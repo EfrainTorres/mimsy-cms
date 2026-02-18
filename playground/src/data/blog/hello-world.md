@@ -1,6 +1,6 @@
 ---
 title: Hello World
-description: Our first blog post - updated
+description: Our first blog post
 author: jane-doe
 tags:
   - welcome
