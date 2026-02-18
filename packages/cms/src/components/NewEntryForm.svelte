@@ -1,4 +1,5 @@
 <script>
+  import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
 
   let {
@@ -16,7 +17,10 @@
   let slugManuallyEdited = $state(false);
   let bodyContent = $state(templateBody || '');
   let creating = $state(false);
-  let error = $state('');
+
+  function toast(message, type) {
+    window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
+  }
   let slugWarning = $state('');
   let checkingSlug = $state(false);
   let slugCheckTimer = null;
@@ -108,10 +112,9 @@
     const trimmedTitle = title.trim();
     const trimmedSlug = slug.trim();
     if (!trimmedTitle || !trimmedSlug) {
-      error = 'Title and slug are required.';
+      toast('Title and slug are required.', 'error');
       return;
     }
-    error = '';
     creating = true;
 
     const frontmatter = { title: trimmedTitle, draft: true };
@@ -128,26 +131,29 @@
         body: JSON.stringify({ slug: trimmedSlug, frontmatter, content: bodyContent }),
       });
       if (res.ok) {
-        window.location.href = `${basePath}/${collection}/${trimmedSlug}`;
+        toast('Entry created', 'success');
+        navigate(`${basePath}/${collection}/${trimmedSlug}`);
       } else if (res.status === 409) {
-        error = 'An entry with this slug already exists.';
+        toast('An entry with this slug already exists.', 'error');
       } else {
         const data = await res.json();
-        error = data.error || 'Failed to create entry.';
+        toast(data.error || 'Failed to create entry.', 'error');
       }
     } catch {
-      error = 'Network error. Please try again.';
+      toast('Network error. Please try again.', 'error');
     }
     creating = false;
   }
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
+      const palette = document.getElementById('mimsy-palette');
+      if (palette && !palette.hidden) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
         document.activeElement.blur();
       } else {
-        window.location.href = `${basePath}/${collection}`;
+        navigate(`${basePath}/${collection}`);
       }
     }
   }
@@ -167,14 +173,6 @@
     </a>
     <h1 class="mimsy-page-heading capitalize">New {collection} Entry</h1>
   </div>
-
-  <!-- Error toast -->
-  {#if error}
-    <div class="mimsy-toast mimsy-toast-error">
-      <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
-      {error}
-    </div>
-  {/if}
 
   <!-- Title + Slug + Extra fields -->
   <div class="mimsy-card p-5 sm:p-6 mb-5 space-y-4">

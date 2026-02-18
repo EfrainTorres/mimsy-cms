@@ -97,46 +97,300 @@ const user = Astro.locals.mimsyUser;
     </main>
   </div>
 
-  <script is:inline>
-    // Mobile sidebar toggle
-    document.addEventListener('click', (e) => {
-      const toggle = e.target.closest('.mimsy-menu-toggle');
-      const sidebar = document.querySelector('.mimsy-sidebar');
-      const overlay = document.querySelector('.mimsy-sidebar-overlay');
-      if (!sidebar || !overlay) return;
+  <!-- Global toast container (survives View Transitions) -->
+  <div id="mimsy-toasts" class="mimsy-toast-container" transition:persist></div>
 
-      if (toggle) {
-        const isOpen = !sidebar.classList.contains('-translate-x-full');
-        sidebar.classList.toggle('-translate-x-full', isOpen);
-        overlay.classList.toggle('opacity-0', isOpen);
-        overlay.classList.toggle('pointer-events-none', isOpen);
+  <!-- Command palette -->
+  <div id="mimsy-palette" class="mimsy-palette-overlay" data-basepath={config.basePath} hidden>
+    <div class="mimsy-palette-panel">
+      <div class="mimsy-palette-input-wrap">
+        <svg class="w-4 h-4 text-stone-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+        <input id="mimsy-palette-input" class="mimsy-palette-input" placeholder="Search entries…" autocomplete="off" />
+        <kbd class="mimsy-palette-kbd">Esc</kbd>
+      </div>
+      <div id="mimsy-palette-results" class="mimsy-palette-results"></div>
+    </div>
+  </div>
+
+  <script is:inline>
+    if (!window.__mimsyInit) {
+      window.__mimsyInit = true;
+
+      // ── Mobile sidebar toggle ──
+      document.addEventListener('click', function(e) {
+        var toggle = e.target.closest('.mimsy-menu-toggle');
+        var sidebar = document.querySelector('.mimsy-sidebar');
+        var overlay = document.querySelector('.mimsy-sidebar-overlay');
+        if (!sidebar || !overlay) return;
+        if (toggle) {
+          var isOpen = !sidebar.classList.contains('-translate-x-full');
+          sidebar.classList.toggle('-translate-x-full', isOpen);
+          overlay.classList.toggle('opacity-0', isOpen);
+          overlay.classList.toggle('pointer-events-none', isOpen);
+        }
+        if (e.target.closest('.mimsy-sidebar-overlay')) {
+          sidebar.classList.add('-translate-x-full');
+          overlay.classList.add('opacity-0', 'pointer-events-none');
+        }
+      });
+
+      // ── Close sidebar on navigation (view transitions) ──
+      document.addEventListener('astro:before-preparation', function() {
+        var sidebar = document.querySelector('.mimsy-sidebar');
+        var overlay = document.querySelector('.mimsy-sidebar-overlay');
+        if (sidebar && overlay && window.innerWidth < 1024) {
+          sidebar.classList.add('-translate-x-full');
+          overlay.classList.add('opacity-0', 'pointer-events-none');
+        }
+      });
+
+      // ── Update active nav highlight after view transition ──
+      function updateSidebarActive() {
+        var path = window.location.pathname;
+        document.querySelectorAll('.mimsy-nav-link').forEach(function(link) {
+          var href = link.getAttribute('href');
+          if (!href) return;
+          var isActive = path === href || path.startsWith(href + '/');
+          if (isActive) link.setAttribute('data-active', '');
+          else link.removeAttribute('data-active');
+        });
       }
-      if (e.target.closest('.mimsy-sidebar-overlay')) {
-        sidebar.classList.add('-translate-x-full');
-        overlay.classList.add('opacity-0', 'pointer-events-none');
+      document.addEventListener('astro:after-swap', updateSidebarActive);
+
+      // ── Global Cmd+S prevention ──
+      document.addEventListener('keydown', function(e) {
+        if ((e.metaKey || e.ctrlKey) && e.key === 's') e.preventDefault();
+      });
+
+      // ── Global Toast System ──
+      function escapeHtml(str) {
+        var div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
       }
-    });
-    // Close sidebar on navigation (view transitions)
-    document.addEventListener('astro:before-preparation', () => {
-      const sidebar = document.querySelector('.mimsy-sidebar');
-      const overlay = document.querySelector('.mimsy-sidebar-overlay');
-      if (sidebar && overlay && window.innerWidth < 1024) {
-        sidebar.classList.add('-translate-x-full');
-        overlay.classList.add('opacity-0', 'pointer-events-none');
+
+      window.addEventListener('mimsy:toast', function(e) {
+        var container = document.getElementById('mimsy-toasts');
+        if (!container) return;
+        var detail = e.detail || {};
+        var msg = detail.message || '';
+        var type = detail.type || 'success';
+
+        var toast = document.createElement('div');
+        toast.className = 'mimsy-toast-item mimsy-toast-' + type;
+
+        var iconSvg = type === 'success'
+          ? '<svg class="mimsy-toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m4.5 12.75 6 6 9-13.5"/></svg>'
+          : '<svg class="mimsy-toast-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z"/></svg>';
+
+        var closeBtn = type === 'error'
+          ? '<button class="mimsy-toast-close" aria-label="Dismiss">&times;</button>'
+          : '';
+
+        toast.innerHTML = iconSvg + '<span>' + escapeHtml(msg) + '</span>' + closeBtn;
+
+        // Close button for error toasts
+        if (type === 'error') {
+          toast.querySelector('.mimsy-toast-close').addEventListener('click', function() {
+            toast.classList.remove('mimsy-toast-visible');
+            setTimeout(function() { toast.remove(); }, 200);
+          });
+        }
+
+        container.appendChild(toast);
+
+        // Trigger enter animation
+        requestAnimationFrame(function() {
+          toast.classList.add('mimsy-toast-visible');
+        });
+
+        // Auto-dismiss success toasts after 3s
+        if (type === 'success') {
+          setTimeout(function() {
+            toast.classList.remove('mimsy-toast-visible');
+            setTimeout(function() { toast.remove(); }, 200);
+          }, 3000);
+        }
+      });
+
+      // ── Command Palette (Cmd+K) ──
+      var paletteCache = null;
+      var paletteCacheTime = 0;
+
+      function openPalette() {
+        var overlay = document.getElementById('mimsy-palette');
+        var input = document.getElementById('mimsy-palette-input');
+        if (!overlay || !input) return;
+        overlay.hidden = false;
+        input.value = '';
+        input.focus();
+        renderPaletteResults('');
+        // Fetch data if stale (>30s)
+        if (!paletteCache || Date.now() - paletteCacheTime > 30000) fetchPaletteData();
       }
-    });
-    // Update active nav highlight after view transition (sidebar is transition:persist)
-    function updateSidebarActive() {
-      const path = window.location.pathname;
-      document.querySelectorAll('.mimsy-nav-link').forEach((link) => {
-        const href = link.getAttribute('href');
-        if (!href) return;
-        const isActive = path === href || path.startsWith(href + '/');
-        if (isActive) link.setAttribute('data-active', '');
-        else link.removeAttribute('data-active');
+
+      function closePalette() {
+        var overlay = document.getElementById('mimsy-palette');
+        if (overlay) overlay.hidden = true;
+      }
+
+      function fetchPaletteData() {
+        var overlay = document.getElementById('mimsy-palette');
+        var basePath = overlay ? overlay.dataset.basepath : '';
+        fetch('/api/mimsy/collections').then(function(r) { return r.json(); }).then(function(data) {
+          var collections = data.collections || [];
+          var promises = collections.map(function(col) {
+            return fetch('/api/mimsy/content/' + col).then(function(r) { return r.json(); }).then(function(d) {
+              return (d.entries || []).map(function(e) {
+                return { collection: col, slug: e.slug, title: (e.frontmatter.title || e.frontmatter.name || e.slug), href: basePath + '/' + col + '/' + e.slug };
+              });
+            });
+          });
+          Promise.all(promises).then(function(results) {
+            paletteCache = [];
+            results.forEach(function(r) { paletteCache = paletteCache.concat(r); });
+            paletteCacheTime = Date.now();
+            var input = document.getElementById('mimsy-palette-input');
+            if (input) renderPaletteResults(input.value);
+          });
+        }).catch(function() {});
+      }
+
+      var paletteActiveIdx = -1;
+
+      function renderPaletteResults(query) {
+        var container = document.getElementById('mimsy-palette-results');
+        if (!container) return;
+        paletteActiveIdx = -1;
+
+        if (!paletteCache) {
+          container.innerHTML = '<div class="mimsy-palette-empty">Loading…</div>';
+          return;
+        }
+
+        var q = query.toLowerCase().trim();
+        var filtered = paletteCache.filter(function(item) {
+          if (!q) return true;
+          return item.title.toLowerCase().indexOf(q) !== -1 || item.slug.toLowerCase().indexOf(q) !== -1 || item.collection.toLowerCase().indexOf(q) !== -1;
+        });
+
+        if (filtered.length === 0) {
+          container.innerHTML = '<div class="mimsy-palette-empty">No results</div>';
+          return;
+        }
+
+        // Group by collection
+        var groups = {};
+        filtered.forEach(function(item) {
+          if (!groups[item.collection]) groups[item.collection] = [];
+          groups[item.collection].push(item);
+        });
+
+        container.innerHTML = '';
+        var idx = 0;
+        Object.keys(groups).forEach(function(col) {
+          var groupEl = document.createElement('div');
+          groupEl.className = 'mimsy-palette-group';
+          groupEl.textContent = col.charAt(0).toUpperCase() + col.slice(1);
+          container.appendChild(groupEl);
+          groups[col].forEach(function(item) {
+            var itemEl = document.createElement('div');
+            itemEl.className = 'mimsy-palette-item';
+            itemEl.dataset.idx = idx;
+            itemEl.dataset.href = item.href;
+            var titleSpan = document.createElement('span');
+            titleSpan.className = 'mimsy-palette-item-title';
+            titleSpan.textContent = item.title;
+            var slugSpan = document.createElement('span');
+            slugSpan.className = 'mimsy-palette-item-slug';
+            slugSpan.textContent = item.slug;
+            itemEl.appendChild(titleSpan);
+            itemEl.appendChild(slugSpan);
+            container.appendChild(itemEl);
+            idx++;
+          });
+        });
+      }
+
+      function navigatePaletteItem(href) {
+        closePalette();
+        // Use a real link click so Astro's View Transitions intercept it
+        var a = document.createElement('a');
+        a.href = href;
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      }
+
+      // Palette keyboard handler
+      document.addEventListener('keydown', function(e) {
+        var overlay = document.getElementById('mimsy-palette');
+        if (!overlay) return;
+
+        // Cmd+K to open
+        if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+          e.preventDefault();
+          if (overlay.hidden) openPalette();
+          else closePalette();
+          return;
+        }
+
+        // Only handle these when palette is open
+        if (overlay.hidden) return;
+
+        if (e.key === 'Escape') {
+          e.preventDefault();
+          e.stopPropagation();
+          closePalette();
+          return;
+        }
+
+        var items = overlay.querySelectorAll('.mimsy-palette-item');
+        if (!items.length) return;
+
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          paletteActiveIdx = Math.min(paletteActiveIdx + 1, items.length - 1);
+          items.forEach(function(el, i) { el.classList.toggle('mimsy-palette-active', i === paletteActiveIdx); });
+          items[paletteActiveIdx].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          paletteActiveIdx = Math.max(paletteActiveIdx - 1, 0);
+          items.forEach(function(el, i) { el.classList.toggle('mimsy-palette-active', i === paletteActiveIdx); });
+          items[paletteActiveIdx].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+          e.preventDefault();
+          var active = paletteActiveIdx >= 0 ? items[paletteActiveIdx] : items[0];
+          if (active) navigatePaletteItem(active.dataset.href);
+        }
+      });
+
+      // Palette input handler
+      document.addEventListener('input', function(e) {
+        if (e.target.id === 'mimsy-palette-input') {
+          renderPaletteResults(e.target.value);
+        }
+      });
+
+      // Click on result or backdrop
+      document.addEventListener('click', function(e) {
+        var overlay = document.getElementById('mimsy-palette');
+        if (!overlay || overlay.hidden) return;
+        var item = e.target.closest('.mimsy-palette-item');
+        if (item) {
+          navigatePaletteItem(item.dataset.href);
+          return;
+        }
+        // Click on backdrop (overlay itself, not the panel)
+        if (e.target === overlay) closePalette();
+      });
+
+      // Invalidate cache only on successful mutations
+      window.addEventListener('mimsy:toast', function(e) {
+        if (e.detail && e.detail.type === 'success') paletteCache = null;
       });
     }
-    document.addEventListener('astro:after-swap', updateSidebarActive);
   </script>
 </body>
 </html>
@@ -386,6 +640,120 @@ const user = Astro.locals.mimsyUser;
     border: 1px solid rgba(254, 202, 202, 0.6);
   }
 
+  /* ── Global Toast Container ── */
+  .mimsy-toast-container {
+    position: fixed;
+    top: 1.25rem;
+    right: 1.25rem;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    pointer-events: none;
+  }
+  @media (max-width: 1023px) {
+    .mimsy-toast-container { top: 4.5rem; right: 1rem; left: 1rem; }
+  }
+  .mimsy-toast-item {
+    pointer-events: auto;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.625rem 1rem;
+    border-radius: 0.5rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+    opacity: 0;
+    transform: translateX(1rem);
+    transition: opacity 200ms ease, transform 200ms ease;
+    max-width: 24rem;
+    margin-left: auto;
+  }
+  @media (max-width: 1023px) {
+    .mimsy-toast-item { max-width: none; margin-left: 0; }
+  }
+  .mimsy-toast-visible {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  .mimsy-toast-item.mimsy-toast-success {
+    background-color: #ecfdf5;
+    color: #047857;
+    border: 1px solid rgba(167, 243, 208, 0.6);
+  }
+  .mimsy-toast-item.mimsy-toast-error {
+    background-color: #fef2f2;
+    color: #b91c1c;
+    border: 1px solid rgba(254, 202, 202, 0.6);
+  }
+  .mimsy-toast-icon {
+    width: 1rem;
+    height: 1rem;
+    flex-shrink: 0;
+  }
+  .mimsy-toast-close {
+    margin-left: auto;
+    padding: 0 0.25rem;
+    font-size: 1.125rem;
+    line-height: 1;
+    opacity: 0.6;
+    cursor: pointer;
+    background: none;
+    border: none;
+    color: inherit;
+  }
+  .mimsy-toast-close:hover { opacity: 1; }
+
+  /* ── Save State Indicator ── */
+  .mimsy-save-state {
+    font-size: 0.75rem;
+    font-weight: 500;
+  }
+  .mimsy-save-dirty { color: #b45309; }
+  .mimsy-save-saving { color: #78716c; }
+  .mimsy-save-saved { color: #047857; }
+
+  /* ── Preview Panel ── */
+  .mimsy-editor-wrap {
+    position: relative;
+  }
+  .mimsy-preview-panel {
+    position: absolute;
+    inset: 0;
+    min-height: calc(100vh - 10rem);
+    display: flex;
+    flex-direction: column;
+    border: 1px solid rgba(231, 229, 228, 0.8);
+    border-radius: 0.75rem;
+    overflow: hidden;
+    background: #fff;
+    transform-origin: top right;
+    opacity: 0;
+    transform: scale(0.97);
+    pointer-events: none;
+    transition: opacity 250ms ease, transform 250ms ease;
+  }
+  .mimsy-preview-open {
+    opacity: 1;
+    transform: scale(1);
+    pointer-events: auto;
+  }
+  .mimsy-preview-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.625rem 1rem;
+    border-bottom: 1px solid rgba(231, 229, 228, 0.8);
+    background-color: #fafaf9;
+    flex-shrink: 0;
+  }
+  .mimsy-preview-iframe {
+    flex: 1;
+    width: 100%;
+    border: none;
+  }
+
   /* ── Back Button ── */
   .mimsy-btn-back {
     display: flex;
@@ -462,5 +830,99 @@ const user = Astro.locals.mimsyUser;
   }
   .mimsy-nav-link[data-active] .mimsy-nav-dot {
     background-color: #8b5cf6; /* violet-500 */
+  }
+
+  /* ── Command Palette ── */
+  .mimsy-palette-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 9998;
+    display: flex;
+    justify-content: center;
+    padding-top: 20vh;
+    background-color: rgba(28, 25, 23, 0.4);
+    backdrop-filter: blur(4px);
+  }
+  .mimsy-palette-overlay[hidden] { display: none; }
+  .mimsy-palette-panel {
+    width: 100%;
+    max-width: 32rem;
+    background-color: #fff;
+    border-radius: 0.75rem;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+    overflow: hidden;
+    height: fit-content;
+    max-height: 60vh;
+    display: flex;
+    flex-direction: column;
+    margin: 0 1rem;
+  }
+  .mimsy-palette-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e7e5e4;
+  }
+  .mimsy-palette-input {
+    flex: 1;
+    border: none;
+    outline: none;
+    font-size: 0.9375rem;
+    font-family: var(--mimsy-font-sans);
+    color: #1c1917;
+    background: transparent;
+  }
+  .mimsy-palette-input::placeholder { color: #a8a29e; }
+  .mimsy-palette-kbd {
+    font-family: var(--mimsy-font-sans);
+    font-size: 0.6875rem;
+    font-weight: 500;
+    padding: 0.125rem 0.375rem;
+    border-radius: 0.25rem;
+    background-color: #f5f5f4;
+    color: #78716c;
+    border: 1px solid #e7e5e4;
+  }
+  .mimsy-palette-results {
+    overflow-y: auto;
+    padding: 0.375rem;
+  }
+  .mimsy-palette-group {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: #a8a29e;
+    padding: 0.625rem 0.625rem 0.25rem;
+  }
+  .mimsy-palette-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.625rem;
+    border-radius: 0.375rem;
+    cursor: pointer;
+    transition: background-color 100ms ease;
+  }
+  .mimsy-palette-item:hover,
+  .mimsy-palette-active {
+    background-color: var(--mimsy-accent-light);
+  }
+  .mimsy-palette-item-title {
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #1c1917;
+  }
+  .mimsy-palette-item-slug {
+    font-family: var(--mimsy-font-mono);
+    font-size: 0.6875rem;
+    color: #a8a29e;
+  }
+  .mimsy-palette-empty {
+    text-align: center;
+    padding: 1.5rem;
+    font-size: 0.875rem;
+    color: #a8a29e;
   }
 </style>

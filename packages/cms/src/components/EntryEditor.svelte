@@ -1,4 +1,6 @@
 <script>
+  import { onDestroy } from 'svelte';
+  import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
   import SeoPreview from './SeoPreview.svelte';
 
@@ -21,20 +23,40 @@
     isDataCollection = false,
     schemaFields = [],
     referenceOptions = {},
+    previewPath = `/${collection}/${slug}`,
   } = $props();
 
   // Local mutable copies of initial data
   let frontmatter = $state(JSON.parse(JSON.stringify(initialFrontmatter)));
   let bodyContent = $state(initialBody + '');
-  let status = $state({ message: '', type: '' });
-  let saving = $state(false);
 
-  function showStatus(message, type) {
-    status = { message, type };
-    if (type === 'success') {
-      setTimeout(() => { status = { message: '', type: '' }; }, 3000);
-    }
+  // Autosave + save state
+  let saveState = $state('clean'); // 'clean' | 'dirty' | 'saving' | 'saved'
+  let autosaveTimer = null;
+  let saveController = null;
+
+  // Preview
+  let previewOpen = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-preview') === 'open'
+  );
+
+  function toast(message, type) {
+    window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
   }
+
+  let pendingDirty = false;
+
+  function scheduleAutosave() {
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    if (saveState === 'saving') { pendingDirty = true; return; }
+    saveState = 'dirty';
+    autosaveTimer = setTimeout(() => save(false), 1500);
+  }
+
+  onDestroy(() => {
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    if (saveController) saveController.abort();
+  });
 
   function getFieldDef(key) {
     return schemaFields.find((f) => f.name === key);
@@ -62,30 +84,50 @@
 
   function handleFieldChange(key, value) {
     frontmatter[key] = value;
+    scheduleAutosave();
   }
 
   function handleArrayFieldChange(key, rawValue) {
     frontmatter[key] = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
+    scheduleAutosave();
   }
 
-  async function save() {
-    saving = true;
+  async function save(manual = true) {
+    if (autosaveTimer) clearTimeout(autosaveTimer);
+    if (saveController) saveController.abort();
+    saveController = new AbortController();
+    const { signal } = saveController;
+    pendingDirty = false;
+
+    saveState = 'saving';
     try {
       const res = await fetch(`/api/mimsy/content/${collection}/${slug}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ frontmatter, content: bodyContent }),
+        signal,
       });
+      if (signal.aborted) return false;
       if (res.ok) {
-        showStatus('Changes saved', 'success');
+        saveState = 'saved';
+        if (manual) toast('Changes saved', 'success');
+        const iframe = document.getElementById('mimsy-preview-frame');
+        if (iframe) iframe.src = iframe.src;
+        setTimeout(() => { if (saveState === 'saved') saveState = 'clean'; }, 2000);
+        if (pendingDirty) scheduleAutosave();
+        return true;
       } else {
         const data = await res.json();
-        showStatus(data.error || 'Failed to save.', 'error');
+        saveState = 'dirty';
+        toast(data.error || 'Failed to save.', 'error');
+        return false;
       }
-    } catch {
-      showStatus('Network error. Please try again.', 'error');
+    } catch (err) {
+      if (err.name === 'AbortError') return false;
+      saveState = 'dirty';
+      toast('Network error. Please try again.', 'error');
+      return false;
     }
-    saving = false;
   }
 
   async function del() {
@@ -95,34 +137,46 @@
         method: 'DELETE',
       });
       if (res.ok) {
-        window.location.href = `${basePath}/${collection}`;
+        toast('Entry deleted', 'success');
+        navigate(`${basePath}/${collection}`);
       } else {
-        showStatus('Failed to delete.', 'error');
+        toast('Failed to delete.', 'error');
       }
     } catch {
-      showStatus('Network error. Please try again.', 'error');
+      toast('Network error. Please try again.', 'error');
     }
   }
 
   async function toggleDraft() {
     frontmatter.draft = !frontmatter.draft;
-    await save();
-    showStatus(frontmatter.draft ? 'Moved to draft' : 'Published', 'success');
+    const ok = await save(false);
+    if (ok) {
+      toast(frontmatter.draft ? 'Moved to draft' : 'Published', 'success');
+    } else {
+      frontmatter.draft = !frontmatter.draft; // revert on failure
+    }
+  }
+
+  function togglePreview() {
+    previewOpen = !previewOpen;
+    localStorage.setItem('mimsy-preview', previewOpen ? 'open' : 'closed');
   }
 
   function handleKeydown(e) {
-    // Cmd/Ctrl+S → Save
+    // Cmd/Ctrl+S → manual save (with toast)
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      save();
+      save(true);
     }
-    // Escape → Back to collection list (only when not in an input/editor)
+    // Escape — let command palette handle first if open
     if (e.key === 'Escape') {
+      const palette = document.getElementById('mimsy-palette');
+      if (palette && !palette.hidden) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
         document.activeElement.blur();
       } else {
-        window.location.href = `${basePath}/${collection}`;
+        navigate(`${basePath}/${collection}`);
       }
     }
   }
@@ -275,60 +329,75 @@
       </h1>
     </div>
     <div class="flex items-center gap-2 shrink-0">
+      {#if saveState === 'dirty'}
+        <span class="mimsy-save-state mimsy-save-dirty">Unsaved changes</span>
+      {:else if saveState === 'saving'}
+        <span class="mimsy-save-state mimsy-save-saving">Saving…</span>
+      {:else if saveState === 'saved'}
+        <span class="mimsy-save-state mimsy-save-saved">Saved</span>
+      {/if}
       <button
         onclick={toggleDraft}
-        disabled={saving}
+        disabled={saveState === 'saving'}
         class="mimsy-status-badge cursor-pointer transition-all hover:scale-105 disabled:opacity-50 {frontmatter.draft ? 'mimsy-status-draft' : 'mimsy-status-published'}"
       >
         <span class="mimsy-status-dot"></span>
         {frontmatter.draft ? 'Draft' : 'Published'}
       </button>
-      <button onclick={save} disabled={saving} class="mimsy-btn-primary">
-        {saving ? 'Saving...' : 'Save'}
+      {#if !isDataCollection}
+        <button onclick={togglePreview} class="mimsy-btn-secondary" title={previewOpen ? 'Close preview' : 'Open preview'}>
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
+        </button>
+      {/if}
+      <button onclick={() => save(true)} disabled={saveState === 'saving'} class="mimsy-btn-primary">
+        {saveState === 'saving' ? 'Saving...' : 'Save'}
       </button>
       <button onclick={del} class="mimsy-btn-danger">Delete</button>
     </div>
   </div>
 
-  <!-- Status toast -->
-  {#if status.message}
-    <div class="mimsy-toast {status.type === 'success' ? 'mimsy-toast-success' : 'mimsy-toast-error'}">
-      {#if status.type === 'success'}
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m4.5 12.75 6 6 9-13.5" /></svg>
-      {:else}
-        <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m9-.75a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9 3.75h.008v.008H12v-.008Z" /></svg>
-      {/if}
-      {status.message}
-    </div>
-  {/if}
+  <div class="mimsy-editor-wrap">
+    {#if !isDataCollection}
+      <!-- Two-column layout for content collections (xl+ = 1280px) -->
+      <div class="xl:grid xl:grid-cols-3 xl:gap-6">
+        <!-- Sidebar: fields + SEO -->
+        <div class="mb-5 xl:mb-0 xl:col-start-3">
+          <div class="xl:sticky xl:top-6 space-y-5">
+            {@render fieldsCard()}
+            {@render seoCard()}
+          </div>
+        </div>
 
-  {#if !isDataCollection}
-    <!-- Two-column layout for content collections (xl+ = 1280px) -->
-    <div class="xl:grid xl:grid-cols-3 xl:gap-6">
-      <!-- Sidebar: fields + SEO (first in DOM → shows first on mobile; placed right on desktop) -->
-      <div class="mb-5 xl:mb-0 xl:col-start-3">
-        <div class="xl:sticky xl:top-6 space-y-5">
-          {@render fieldsCard()}
-          {@render seoCard()}
+        <!-- Main: content editor -->
+        <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1">
+          <div class="mimsy-card p-5">
+            <p class="mimsy-section-title">Content</p>
+            <TiptapEditor
+              content={initialBody}
+              onchange={(md) => { bodyContent = md; scheduleAutosave(); }}
+            />
+          </div>
         </div>
       </div>
 
-      <!-- Main: content editor (second in DOM → shows after fields on mobile; placed left on desktop) -->
-      <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1">
-        <div class="mimsy-card p-5">
-          <p class="mimsy-section-title">Content</p>
-          <TiptapEditor
-            content={initialBody}
-            onchange={(md) => { bodyContent = md; }}
-          />
+      <!-- Preview overlay (always in DOM, animated via CSS) -->
+      <div class="mimsy-preview-panel" class:mimsy-preview-open={previewOpen}>
+        <div class="mimsy-preview-header">
+          <span class="mimsy-section-title" style="margin-bottom:0">Preview</span>
+          <button onclick={togglePreview} class="mimsy-toast-close" title="Close preview">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+          </button>
         </div>
+        {#if previewOpen}
+          <iframe id="mimsy-preview-frame" src={previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
+        {/if}
       </div>
-    </div>
-  {:else}
-    <!-- Single column for data collections -->
-    <div class="max-w-2xl space-y-5">
-      {@render fieldsCard()}
-      {@render seoCard()}
-    </div>
-  {/if}
+    {:else}
+      <!-- Single column for data collections -->
+      <div class="max-w-2xl space-y-5">
+        {@render fieldsCard()}
+        {@render seoCard()}
+      </div>
+    {/if}
+  </div>
 </div>
