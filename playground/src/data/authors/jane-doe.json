@@ -1,6 +1,5 @@
 {
   "name": "Jane Doe",
   "email": "jane@example.com",
-  "bio": "Technical writer and web developer.",
-  "avatar": "/images/jane.jpg"
+  "bio": "Writer"
 }

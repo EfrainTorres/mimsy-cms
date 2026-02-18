@@ -1,5 +1,7 @@
 import type { APIRoute } from 'astro';
 import { createAdapter } from '../../../adapters/factory.js';
+import validators from 'virtual:mimsy/validators';
+import { validateFrontmatter } from '../../../schema-validation.js';
 
 /** GET /api/mimsy/content/[collection] — list entries (lightweight, no body) */
 export const GET: APIRoute = async ({ params, request, locals }) => {
@@ -34,6 +36,17 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
 
   if (!slug || !frontmatter) {
     return new Response(JSON.stringify({ error: 'Missing slug or frontmatter' }), { status: 400 });
+  }
+
+  const schema = validators[collection];
+  if (schema) {
+    const validation = await validateFrontmatter(schema, frontmatter);
+    if (!validation.success) {
+      return new Response(JSON.stringify({
+        error: validation.error,
+        fieldErrors: validation.fieldErrors,
+      }), { status: 400 });
+    }
   }
 
   const adapter = await createAdapter(request, locals);

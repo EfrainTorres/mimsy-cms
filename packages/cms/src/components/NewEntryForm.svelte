@@ -137,7 +137,14 @@
         toast('An entry with this slug already exists.', 'error');
       } else {
         const data = await res.json();
-        toast(data.error || 'Failed to create entry.', 'error');
+        let msg = data.error || 'Failed to create entry.';
+        if (data.fieldErrors) {
+          const details = Object.entries(data.fieldErrors)
+            .map(([field, errs]) => `${field}: ${errs.join(', ')}`)
+            .join(' · ');
+          if (details) msg += ' — ' + details;
+        }
+        toast(msg, 'error');
       }
     } catch {
       toast('Network error. Please try again.', 'error');

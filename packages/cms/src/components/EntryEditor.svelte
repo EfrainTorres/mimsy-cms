@@ -119,7 +119,14 @@
       } else {
         const data = await res.json();
         saveState = 'dirty';
-        toast(data.error || 'Failed to save.', 'error');
+        let msg = data.error || 'Failed to save.';
+        if (data.fieldErrors) {
+          const details = Object.entries(data.fieldErrors)
+            .map(([field, errs]) => `${field}: ${errs.join(', ')}`)
+            .join(' · ');
+          if (details) msg += ' — ' + details;
+        }
+        toast(msg, 'error');
         return false;
       }
     } catch (err) {

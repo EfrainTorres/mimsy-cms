@@ -12,3 +12,9 @@ declare module 'virtual:mimsy/schemas' {
   const schemas: Record<string, CollectionSchema>;
   export default schemas;
 }
+
+declare module 'virtual:mimsy/validators' {
+  import type { ZodTypeAny } from 'astro/zod';
+  const validators: Record<string, ZodTypeAny>;
+  export default validators;
+}
