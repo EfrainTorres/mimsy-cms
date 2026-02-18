@@ -1,11 +1,11 @@
 ---
-title: "Getting Started with MimsyCMS"
-description: "Learn how to set up MimsyCMS in your Astro project"
+title: Getting Started with MimsyCMS
+description: Learn how to set up MimsyCMS in your Astro project
 author: john-smith
 tags:
   - tutorial
   - setup
-draft: true
+draft: false
 ---
 
 # Getting Started
