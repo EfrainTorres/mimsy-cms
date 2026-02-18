@@ -1,0 +1,26 @@
+---
+import { getCollection } from 'astro:content';
+
+const posts = await getCollection('blog', ({ data }) => !data.draft);
+---
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>My Blog</title>
+</head>
+<body style="font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem;">
+  <h1>My Blog</h1>
+  <ul>
+    {posts.map((post) => (
+      <li style="margin-bottom: 0.5rem;">
+        <strong>{post.data.title}</strong>
+        {post.data.description && <span style="color: #666;"> — {post.data.description}</span>}
+      </li>
+    ))}
+  </ul>
+  <hr style="margin: 2rem 0;" />
+  <p><a href="/admin">Go to Admin &rarr;</a></p>
+</body>
+</html>

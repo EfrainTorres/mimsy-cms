@@ -1,0 +1,212 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import config from 'virtual:mimsy/config';
+import { LocalContentAdapter } from '../../../adapters/local.js';
+import { resolveContentDir } from '../../../utils.js';
+
+const { collection } = Astro.params;
+if (!collection) return Astro.redirect(config.basePath);
+
+const adapter = new LocalContentAdapter(resolveContentDir());
+const collections = await adapter.listCollections();
+
+if (!collections.includes(collection)) {
+  return Astro.redirect(config.basePath);
+}
+
+const entries = await adapter.listEntries(collection);
+---
+
+<AdminLayout title={collection} activeCollection={collection}>
+  <!-- Page header -->
+  <div class="flex items-center justify-between mb-8">
+    <h1 class="mimsy-page-heading capitalize">{collection}</h1>
+    <a href={`${config.basePath}/${collection}/new`} class="mimsy-btn-primary">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.5v15m7.5-7.5h-15" /></svg>
+      New Entry
+    </a>
+  </div>
+
+  {entries.length === 0 ? (
+    <!-- Empty state -->
+    <div class="mimsy-card flex flex-col items-center py-20 px-6 text-center">
+      <div class="w-10 h-10 rounded-xl bg-stone-100 flex items-center justify-center mb-4">
+        <svg class="w-5 h-5 text-stone-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" /></svg>
+      </div>
+      <p class="text-sm text-stone-500 mb-3">No entries yet</p>
+      <a href={`${config.basePath}/${collection}/new`} class="text-sm font-medium text-violet-600 hover:text-violet-700 transition-colors">
+        Create your first entry &rarr;
+      </a>
+    </div>
+  ) : (
+    <!-- Search + Filter bar -->
+    <div class="flex flex-col sm:flex-row gap-3 mb-5">
+      <div class="mimsy-search-wrapper flex-1 max-w-sm">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+        <input type="text" class="mimsy-input" placeholder="Search entries..." id="mimsy-search" autocomplete="off" />
+      </div>
+      <div class="flex items-center gap-1.5">
+        <button class="mimsy-filter-btn active" data-filter="all">All <span class="ml-1 opacity-60" data-count="all">{entries.length}</span></button>
+        <button class="mimsy-filter-btn" data-filter="published">Published</button>
+        <button class="mimsy-filter-btn" data-filter="draft">Draft</button>
+      </div>
+    </div>
+
+    <!-- Entries table -->
+    <div class="mimsy-card overflow-hidden" id="mimsy-entries-card">
+      <table class="w-full" id="mimsy-entries-table">
+        <thead>
+          <tr class="border-b border-stone-100">
+            <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Title</th>
+            <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Status</th>
+            <th class="px-5 py-3 text-right text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400 hidden sm:table-cell"><span class="sr-only">Actions</span></th>
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((entry) => {
+            const entryTitle = (entry.frontmatter.title || entry.frontmatter.name || entry.slug) as string;
+            const isDraft = entry.frontmatter.draft === true;
+            return (
+              <tr
+                class="group transition-colors hover:bg-stone-50/80 border-b border-stone-100/80 last:border-b-0"
+                data-title={entryTitle.toLowerCase()}
+                data-slug={entry.slug}
+                data-draft={isDraft ? 'true' : 'false'}
+              >
+                <td class="px-5 py-3.5">
+                  <a
+                    href={`${config.basePath}/${collection}/${entry.slug}`}
+                    class="block"
+                  >
+                    <span class="text-sm font-medium text-stone-800 group-hover:text-violet-700 transition-colors">{entryTitle}</span>
+                    <span class="block text-[11px] text-stone-400 mt-0.5 font-mono">{entry.slug}</span>
+                  </a>
+                </td>
+                <td class="px-5 py-3.5">
+                  <span class:list={[
+                    'mimsy-status-badge',
+                    isDraft ? 'mimsy-status-draft' : 'mimsy-status-published',
+                  ]}>
+                    <span class="mimsy-status-dot" />
+                    {isDraft ? 'Draft' : 'Published'}
+                  </span>
+                </td>
+                <td class="px-5 py-3.5 text-right hidden sm:table-cell">
+                  <a
+                    href={`${config.basePath}/${collection}/${entry.slug}`}
+                    class="text-xs font-medium text-stone-400 hover:text-violet-600 transition-colors"
+                  >
+                    Edit &rarr;
+                  </a>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+
+      <!-- No results message -->
+      <div id="mimsy-no-results" class="hidden py-12 text-center">
+        <p class="text-sm text-stone-400">No entries match your search</p>
+      </div>
+
+      <!-- Pagination -->
+      <div id="mimsy-pagination" class="hidden border-t border-stone-100 px-5 py-3 flex items-center justify-between">
+        <span class="text-xs text-stone-400" id="mimsy-page-info"></span>
+        <div class="flex gap-1.5">
+          <button id="mimsy-prev" class="mimsy-filter-btn" disabled>Prev</button>
+          <button id="mimsy-next" class="mimsy-filter-btn">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <script is:inline>
+    (function() {
+      var PAGE_SIZE = 25;
+      var search = document.getElementById('mimsy-search');
+      var filterBtns = document.querySelectorAll('[data-filter]');
+      var rows = Array.from(document.querySelectorAll('#mimsy-entries-table tbody tr'));
+      var noResults = document.getElementById('mimsy-no-results');
+      var pagination = document.getElementById('mimsy-pagination');
+      var pageInfo = document.getElementById('mimsy-page-info');
+      var prevBtn = document.getElementById('mimsy-prev');
+      var nextBtn = document.getElementById('mimsy-next');
+
+      var activeFilter = 'all';
+      var currentPage = 0;
+
+      function getFiltered() {
+        var query = (search ? search.value : '').toLowerCase();
+        return rows.filter(function(row) {
+          var title = row.dataset.title || '';
+          var slug = row.dataset.slug || '';
+          var isDraft = row.dataset.draft === 'true';
+          var matchesSearch = !query || title.indexOf(query) !== -1 || slug.indexOf(query) !== -1;
+          var matchesFilter = activeFilter === 'all' ||
+            (activeFilter === 'draft' && isDraft) ||
+            (activeFilter === 'published' && !isDraft);
+          return matchesSearch && matchesFilter;
+        });
+      }
+
+      function render() {
+        var filtered = getFiltered();
+        var totalPages = Math.ceil(filtered.length / PAGE_SIZE) || 1;
+        if (currentPage >= totalPages) currentPage = totalPages - 1;
+        var start = currentPage * PAGE_SIZE;
+        var end = start + PAGE_SIZE;
+
+        rows.forEach(function(r) { r.style.display = 'none'; });
+        filtered.forEach(function(r, i) {
+          r.style.display = (i >= start && i < end) ? '' : 'none';
+        });
+
+        if (noResults) noResults.classList.toggle('hidden', filtered.length > 0);
+
+        if (pagination) {
+          pagination.classList.toggle('hidden', filtered.length <= PAGE_SIZE);
+          if (pageInfo) pageInfo.textContent = (start + 1) + '\u2013' + Math.min(end, filtered.length) + ' of ' + filtered.length;
+          if (prevBtn) prevBtn.disabled = currentPage === 0;
+          if (nextBtn) nextBtn.disabled = currentPage >= totalPages - 1;
+        }
+
+        var allCountEl = document.querySelector('[data-count="all"]');
+        if (allCountEl) allCountEl.textContent = filtered.length;
+      }
+
+      if (search) search.addEventListener('input', function() { currentPage = 0; render(); });
+
+      filterBtns.forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          filterBtns.forEach(function(b) { b.classList.remove('active'); });
+          btn.classList.add('active');
+          activeFilter = btn.dataset.filter;
+          currentPage = 0;
+          render();
+        });
+      });
+
+      if (prevBtn) prevBtn.addEventListener('click', function() { currentPage--; render(); });
+      if (nextBtn) nextBtn.addEventListener('click', function() { currentPage++; render(); });
+
+      // Keyboard shortcuts
+      document.addEventListener('keydown', function(e) {
+        var tag = document.activeElement ? document.activeElement.tagName : '';
+        var inInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+
+        // "/" → Focus search (when not already in an input)
+        if (e.key === '/' && !inInput) {
+          e.preventDefault();
+          if (search) search.focus();
+        }
+        // Escape → Blur search
+        if (e.key === 'Escape' && inInput) {
+          document.activeElement.blur();
+        }
+      });
+
+      render();
+    })();
+    </script>
+  )}
+</AdminLayout>

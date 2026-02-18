@@ -1,0 +1,30 @@
+---
+import config from 'virtual:mimsy/config';
+import { LocalContentAdapter } from '../../adapters/local.js';
+import { resolveContentDir } from '../../utils.js';
+
+const adapter = new LocalContentAdapter(resolveContentDir());
+const collections = await adapter.listCollections();
+
+if (collections.length > 0) {
+  return Astro.redirect(`${config.basePath}/${collections[0]}`);
+}
+---
+
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MimsyCMS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=DM+Sans:opsz,wght@9..40,400;9..40,500&display=swap" rel="stylesheet" />
+</head>
+<body class="bg-stone-50 flex items-center justify-center min-h-screen antialiased" style="font-family: 'DM Sans', system-ui, sans-serif;">
+  <div class="text-center px-6">
+    <span class="inline-flex items-center justify-center w-12 h-12 rounded-2xl bg-violet-600 text-white mb-5" style="font-family: 'Instrument Serif', Georgia, serif; font-size: 1.25rem;">M</span>
+    <h1 class="text-xl font-medium text-stone-900 mb-1.5" style="font-family: 'Instrument Serif', Georgia, serif;">No collections found</h1>
+    <p class="text-sm text-stone-500 max-w-xs mx-auto leading-relaxed">Add content collections to your Astro project&rsquo;s <code class="text-xs bg-stone-100 border border-stone-200 px-1.5 py-0.5 rounded">content.config.ts</code></p>
+  </div>
+</body>
+</html>

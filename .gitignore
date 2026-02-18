@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Astro generated
+.astro/
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Dev tooling
+CLAUDE.md
+plan.md
+.claude/
+.playwright-mcp/
+ScreenShots/
+
+# Dev uploads (created during testing)
+playground/src/assets/uploads/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

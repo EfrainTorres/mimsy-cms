@@ -1,0 +1,57 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import config from 'virtual:mimsy/config';
+import schemas from 'virtual:mimsy/schemas';
+import { LocalContentAdapter } from '../../../adapters/local.js';
+import { resolveContentDir } from '../../../utils.js';
+import EntryEditor from '../../../components/EntryEditor.svelte';
+
+const { collection, slug } = Astro.params;
+if (!collection || !slug) return Astro.redirect(config.basePath);
+
+const adapter = new LocalContentAdapter(resolveContentDir());
+const entry = await adapter.getEntry(collection, slug);
+
+if (!entry) {
+  return Astro.redirect(`${config.basePath}/${collection}`);
+}
+
+// Determine if this is a JSON (data) collection
+const isDataCollection = entry.body === '' && entry.rawContent.trim().startsWith('{');
+
+// Get schema fields for this collection (if available)
+const schemaFields = schemas[collection] ?? [];
+
+// Build reference options for any reference fields
+const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
+for (const field of schemaFields) {
+  if (field.type === 'reference' && field.referenceCollection && field.referenceCollection !== '__unknown__') {
+    const refCollection = field.referenceCollection;
+    if (!referenceOptions[refCollection]) {
+      try {
+        const refEntries = await adapter.listEntries(refCollection);
+        referenceOptions[refCollection] = refEntries.map((e) => ({
+          slug: e.slug,
+          label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
+        }));
+      } catch {
+        referenceOptions[refCollection] = [];
+      }
+    }
+  }
+}
+---
+
+<AdminLayout title={`Edit: ${entry.slug}`} activeCollection={collection}>
+  <EntryEditor
+    client:load
+    collection={collection}
+    slug={slug}
+    basePath={config.basePath}
+    initialFrontmatter={entry.frontmatter}
+    initialBody={entry.body}
+    isDataCollection={isDataCollection}
+    schemaFields={schemaFields}
+    referenceOptions={referenceOptions}
+  />
+</AdminLayout>

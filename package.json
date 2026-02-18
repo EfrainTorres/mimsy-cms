@@ -1,0 +1,13 @@
+{
+  "name": "mimsy-cms-monorepo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "pnpm --filter playground dev",
+    "build": "pnpm --filter playground build"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9"
+  }
+}

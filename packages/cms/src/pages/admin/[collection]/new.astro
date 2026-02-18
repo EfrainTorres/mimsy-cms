@@ -1,0 +1,83 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import config from 'virtual:mimsy/config';
+import schemas from 'virtual:mimsy/schemas';
+import { LocalContentAdapter } from '../../../adapters/local.js';
+import { resolveContentDir } from '../../../utils.js';
+import NewEntryForm from '../../../components/NewEntryForm.svelte';
+import { readFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import matter from 'gray-matter';
+
+const { collection } = Astro.params;
+if (!collection) return Astro.redirect(config.basePath);
+
+const adapter = new LocalContentAdapter(resolveContentDir());
+
+// Determine if this is a data (JSON) collection by checking existing entries
+const entries = await adapter.listEntries(collection);
+const isDataCollection = entries.length > 0
+  ? entries[0].body === '' && entries[0].rawContent.trim().startsWith('{')
+  : false;
+
+// Get schema fields for this collection (if available)
+const schemaFields = schemas[collection] ?? [];
+
+// Build reference options for any reference fields
+const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
+for (const field of schemaFields) {
+  if (field.type === 'reference' && field.referenceCollection && field.referenceCollection !== '__unknown__') {
+    const refCollection = field.referenceCollection;
+    if (!referenceOptions[refCollection]) {
+      try {
+        const refEntries = await adapter.listEntries(refCollection);
+        referenceOptions[refCollection] = refEntries.map((e) => ({
+          slug: e.slug,
+          label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
+        }));
+      } catch {
+        referenceOptions[refCollection] = [];
+      }
+    }
+  }
+}
+
+// Load content template if available
+let templateBody = '';
+let templateFrontmatter: Record<string, unknown> = {};
+
+const contentDir = resolveContentDir();
+const templateMdPath = `${contentDir}/_templates/${collection}.md`;
+const templateJsonPath = `${contentDir}/_templates/${collection}.json`;
+
+if (existsSync(templateMdPath)) {
+  try {
+    const raw = await readFile(templateMdPath, 'utf-8');
+    const parsed = matter(raw);
+    templateBody = parsed.content.trim();
+    templateFrontmatter = parsed.data ?? {};
+  } catch {
+    // Template loading failed; continue without template
+  }
+} else if (existsSync(templateJsonPath)) {
+  try {
+    const raw = await readFile(templateJsonPath, 'utf-8');
+    templateFrontmatter = JSON.parse(raw);
+  } catch {
+    // Template loading failed; continue without template
+  }
+}
+---
+
+<AdminLayout title={`New ${collection}`} activeCollection={collection}>
+  <NewEntryForm
+    client:load
+    collection={collection}
+    basePath={config.basePath}
+    isDataCollection={isDataCollection}
+    schemaFields={schemaFields}
+    referenceOptions={referenceOptions}
+    templateBody={templateBody}
+    templateFrontmatter={templateFrontmatter}
+  />
+</AdminLayout>
