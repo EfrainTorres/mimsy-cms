@@ -5,7 +5,7 @@ author: john-smith
 tags:
   - tutorial
   - setup
-draft: false
+draft: true
 ---
 
 # Getting Started
