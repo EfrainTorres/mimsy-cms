@@ -1,9 +1,8 @@
 ---
 import config from 'virtual:mimsy/config';
-import { LocalContentAdapter } from '../../adapters/local.js';
-import { resolveContentDir } from '../../utils.js';
+import { createAdapter } from '../../adapters/factory.js';
 
-const adapter = new LocalContentAdapter(resolveContentDir());
+const adapter = await createAdapter(Astro.request, Astro.locals);
 const collections = await adapter.listCollections();
 
 if (collections.length > 0) {

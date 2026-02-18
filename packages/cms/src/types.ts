@@ -38,6 +38,22 @@ export interface SchemaField {
 /** Schema field map for a collection: field name → field info */
 export type CollectionSchema = SchemaField[];
 
+/** Authenticated user info (set by middleware in GitHub mode) */
+export interface MimsyUser {
+  login: string;
+  name: string;
+  email: string;
+  avatar: string;
+}
+
+/** Error thrown when a concurrent edit causes a conflict (GitHub mode). */
+export class ConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConflictError';
+  }
+}
+
 /** Content adapter interface — filesystem or GitHub */
 export interface ContentAdapter {
   listCollections(): Promise<string[]>;
@@ -46,4 +62,10 @@ export interface ContentAdapter {
   createEntry(collection: string, slug: string, frontmatter: Record<string, unknown>, body: string): Promise<void>;
   updateEntry(collection: string, slug: string, frontmatter: Record<string, unknown>, body: string): Promise<void>;
   deleteEntry(collection: string, slug: string): Promise<void>;
+
+  /** Write an asset file (image upload). Returns the public URL. */
+  writeAsset(filePath: string, content: Uint8Array, filename: string): Promise<string>;
+
+  /** Read an arbitrary file by path. Returns content string or null if not found. */
+  getFileContent(path: string): Promise<string | null>;
 }

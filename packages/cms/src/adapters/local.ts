@@ -1,5 +1,5 @@
 import { readdir, readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
-import { join, parse as parsePath, extname } from 'node:path';
+import { join, dirname, parse as parsePath, extname } from 'node:path';
 import { existsSync } from 'node:fs';
 import matter from 'gray-matter';
 import type { ContentAdapter, ContentEntry } from '../types.js';
@@ -126,6 +126,23 @@ export class LocalContentAdapter implements ContentAdapter {
         return;
       }
     }
+  }
+
+  async writeAsset(filePath: string, content: Uint8Array, filename: string): Promise<string> {
+    // Derive upload dir from content dir: src/data → project root → src/assets/uploads
+    const projectRoot = dirname(dirname(this.contentDir));
+    const uploadDir = join(projectRoot, 'src', 'assets', 'uploads');
+    await mkdir(uploadDir, { recursive: true });
+
+    const dest = join(uploadDir, filename);
+    await writeFile(dest, content);
+    return `/src/assets/uploads/${filename}`;
+  }
+
+  async getFileContent(path: string): Promise<string | null> {
+    const fullPath = path.startsWith('/') ? path : join(this.contentDir, path);
+    if (!existsSync(fullPath)) return null;
+    return readFile(fullPath, 'utf-8');
   }
 
   private async isJsonCollection(collection: string): Promise<boolean> {

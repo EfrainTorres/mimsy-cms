@@ -2,6 +2,7 @@ declare module 'virtual:mimsy/config' {
   const config: {
     basePath: string;
     contentDir: string;
+    isGitHubMode: boolean;
   };
   export default config;
 }

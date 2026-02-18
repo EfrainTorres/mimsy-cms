@@ -15,10 +15,11 @@ export function vitePluginMimsy(
   const srcDir = astroConfig.srcDir ? new URL('.', astroConfig.srcDir).pathname : './src';
   const contentDir = mimsyConfig.contentDir ?? `${srcDir}/data`;
 
-  const configModule = `export default ${JSON.stringify({
-    basePath: mimsyConfig.basePath,
-    contentDir,
-  })};`;
+  const configModule = `export default {
+  basePath: ${JSON.stringify(mimsyConfig.basePath)},
+  contentDir: ${JSON.stringify(contentDir)},
+  get isGitHubMode() { return !!import.meta.env.MIMSY_GITHUB_REPO; },
+};`;
 
   // virtual:mimsy/schemas generates code that imports the user's content config
   // and runs schema introspection at build/dev time

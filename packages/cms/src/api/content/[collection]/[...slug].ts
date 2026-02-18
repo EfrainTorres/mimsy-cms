@@ -1,15 +1,15 @@
 import type { APIRoute } from 'astro';
-import { LocalContentAdapter } from '../../../adapters/local.js';
-import { resolveContentDir } from '../../../utils.js';
+import { createAdapter } from '../../../adapters/factory.js';
+import { ConflictError } from '../../../types.js';
 
 /** GET /api/mimsy/content/[collection]/[slug] — get single entry with body */
-export const GET: APIRoute = async ({ params }) => {
+export const GET: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
   if (!collection || !slug) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
-  const adapter = new LocalContentAdapter(resolveContentDir());
+  const adapter = await createAdapter(request, locals);
   const entry = await adapter.getEntry(collection, slug);
 
   if (!entry) {
@@ -22,7 +22,7 @@ export const GET: APIRoute = async ({ params }) => {
 };
 
 /** PUT /api/mimsy/content/[collection]/[slug] — update entry */
-export const PUT: APIRoute = async ({ params, request }) => {
+export const PUT: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
   if (!collection || !slug) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
@@ -35,8 +35,16 @@ export const PUT: APIRoute = async ({ params, request }) => {
     return new Response(JSON.stringify({ error: 'Missing frontmatter' }), { status: 400 });
   }
 
-  const adapter = new LocalContentAdapter(resolveContentDir());
-  await adapter.updateEntry(collection, slug, frontmatter, content ?? '');
+  const adapter = await createAdapter(request, locals);
+
+  try {
+    await adapter.updateEntry(collection, slug, frontmatter, content ?? '');
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      return new Response(JSON.stringify({ error: err.message }), { status: 409 });
+    }
+    throw err;
+  }
 
   return new Response(JSON.stringify({ slug, collection }), {
     headers: { 'Content-Type': 'application/json' },
@@ -44,14 +52,22 @@ export const PUT: APIRoute = async ({ params, request }) => {
 };
 
 /** DELETE /api/mimsy/content/[collection]/[slug] — delete entry */
-export const DELETE: APIRoute = async ({ params }) => {
+export const DELETE: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
   if (!collection || !slug) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
-  const adapter = new LocalContentAdapter(resolveContentDir());
-  await adapter.deleteEntry(collection, slug);
+  const adapter = await createAdapter(request, locals);
+
+  try {
+    await adapter.deleteEntry(collection, slug);
+  } catch (err) {
+    if (err instanceof ConflictError) {
+      return new Response(JSON.stringify({ error: err.message }), { status: 409 });
+    }
+    throw err;
+  }
 
   return new Response(null, { status: 204 });
 };

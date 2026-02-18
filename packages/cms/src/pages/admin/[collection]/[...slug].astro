@@ -2,14 +2,13 @@
 import AdminLayout from '../../layouts/AdminLayout.astro';
 import config from 'virtual:mimsy/config';
 import schemas from 'virtual:mimsy/schemas';
-import { LocalContentAdapter } from '../../../adapters/local.js';
-import { resolveContentDir } from '../../../utils.js';
+import { createAdapter } from '../../../adapters/factory.js';
 import EntryEditor from '../../../components/EntryEditor.svelte';
 
 const { collection, slug } = Astro.params;
 if (!collection || !slug) return Astro.redirect(config.basePath);
 
-const adapter = new LocalContentAdapter(resolveContentDir());
+const adapter = await createAdapter(Astro.request, Astro.locals);
 const entry = await adapter.getEntry(collection, slug);
 
 if (!entry) {

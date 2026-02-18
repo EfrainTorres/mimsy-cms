@@ -1,9 +1,8 @@
 import type { APIRoute } from 'astro';
-import { LocalContentAdapter } from '../adapters/local.js';
-import { resolveContentDir } from '../utils.js';
+import { createAdapter } from '../adapters/factory.js';
 
-export const GET: APIRoute = async () => {
-  const adapter = new LocalContentAdapter(resolveContentDir());
+export const GET: APIRoute = async ({ request, locals }) => {
+  const adapter = await createAdapter(request, locals);
   const collections = await adapter.listCollections();
   return new Response(JSON.stringify({ collections }), {
     headers: { 'Content-Type': 'application/json' },

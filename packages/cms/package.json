@@ -19,6 +19,7 @@
     "@tiptap/markdown": "^3.0.0",
     "@tiptap/pm": "^3.0.0",
     "@tiptap/starter-kit": "^3.0.0",
-    "gray-matter": "^4.0.3"
+    "gray-matter": "^4.0.3",
+    "octokit": "^4.0.0"
   }
 }

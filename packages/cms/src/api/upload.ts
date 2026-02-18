@@ -1,7 +1,5 @@
 import type { APIRoute } from 'astro';
-import { resolveContentDir } from '../utils.js';
-import { join, dirname } from 'node:path';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { createAdapter } from '../adapters/factory.js';
 
 const ALLOWED_MIME_TYPES = new Set([
   'image/png',
@@ -13,7 +11,7 @@ const ALLOWED_MIME_TYPES = new Set([
 
 const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async ({ request, locals }) => {
   try {
     const contentType = request.headers.get('content-type') ?? '';
     if (!contentType.includes('multipart/form-data')) {
@@ -49,27 +47,15 @@ export const POST: APIRoute = async ({ request }) => {
       );
     }
 
-    // Derive upload directory from content dir.
-    // Content dir is {projectRoot}/src/data — go up two levels to {projectRoot}, then into src/assets/uploads
-    const contentDir = resolveContentDir();
-    const projectRoot = dirname(dirname(contentDir)); // up from src/data to projectRoot
-    const uploadDir = join(projectRoot, 'src', 'assets', 'uploads');
-
-    // Ensure upload directory exists
-    await mkdir(uploadDir, { recursive: true });
-
     // Generate unique filename: {timestamp}-{originalName}
     const timestamp = Date.now();
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
     const filename = `${timestamp}-${safeName}`;
 
-    // Write file to disk
-    const buffer = Buffer.from(await file.arrayBuffer());
-    const filePath = join(uploadDir, filename);
-    await writeFile(filePath, buffer);
-
-    // Return Vite root-relative path
-    const url = `/src/assets/uploads/${filename}`;
+    // Write via adapter (works for both local filesystem and GitHub)
+    const adapter = await createAdapter(request, locals);
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    const url = await adapter.writeAsset(`src/assets/uploads/${filename}`, bytes, filename);
 
     return new Response(
       JSON.stringify({ url }),

@@ -2,17 +2,14 @@
 import AdminLayout from '../../layouts/AdminLayout.astro';
 import config from 'virtual:mimsy/config';
 import schemas from 'virtual:mimsy/schemas';
-import { LocalContentAdapter } from '../../../adapters/local.js';
-import { resolveContentDir } from '../../../utils.js';
+import { createAdapter } from '../../../adapters/factory.js';
 import NewEntryForm from '../../../components/NewEntryForm.svelte';
-import { readFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
 import matter from 'gray-matter';
 
 const { collection } = Astro.params;
 if (!collection) return Astro.redirect(config.basePath);
 
-const adapter = new LocalContentAdapter(resolveContentDir());
+const adapter = await createAdapter(Astro.request, Astro.locals);
 
 // Determine if this is a data (JSON) collection by checking existing entries
 const entries = await adapter.listEntries(collection);
@@ -42,29 +39,27 @@ for (const field of schemaFields) {
   }
 }
 
-// Load content template if available
+// Load content template via adapter (works for both local and GitHub)
 let templateBody = '';
 let templateFrontmatter: Record<string, unknown> = {};
 
-const contentDir = resolveContentDir();
-const templateMdPath = `${contentDir}/_templates/${collection}.md`;
-const templateJsonPath = `${contentDir}/_templates/${collection}.json`;
-
-if (existsSync(templateMdPath)) {
+const mdTemplate = await adapter.getFileContent(`_templates/${collection}.md`);
+if (mdTemplate) {
   try {
-    const raw = await readFile(templateMdPath, 'utf-8');
-    const parsed = matter(raw);
+    const parsed = matter(mdTemplate);
     templateBody = parsed.content.trim();
     templateFrontmatter = parsed.data ?? {};
   } catch {
-    // Template loading failed; continue without template
+    // Template parsing failed; continue without template
   }
-} else if (existsSync(templateJsonPath)) {
-  try {
-    const raw = await readFile(templateJsonPath, 'utf-8');
-    templateFrontmatter = JSON.parse(raw);
-  } catch {
-    // Template loading failed; continue without template
+} else {
+  const jsonTemplate = await adapter.getFileContent(`_templates/${collection}.json`);
+  if (jsonTemplate) {
+    try {
+      templateFrontmatter = JSON.parse(jsonTemplate);
+    } catch {
+      // Template parsing failed; continue without template
+    }
   }
 }
 ---

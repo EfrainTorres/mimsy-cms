@@ -1,13 +1,12 @@
 ---
 import AdminLayout from '../../layouts/AdminLayout.astro';
 import config from 'virtual:mimsy/config';
-import { LocalContentAdapter } from '../../../adapters/local.js';
-import { resolveContentDir } from '../../../utils.js';
+import { createAdapter } from '../../../adapters/factory.js';
 
 const { collection } = Astro.params;
 if (!collection) return Astro.redirect(config.basePath);
 
-const adapter = new LocalContentAdapter(resolveContentDir());
+const adapter = await createAdapter(Astro.request, Astro.locals);
 const collections = await adapter.listCollections();
 
 if (!collections.includes(collection)) {

@@ -1,8 +1,7 @@
 ---
 import { ClientRouter } from 'astro:transitions';
 import config from 'virtual:mimsy/config';
-import { LocalContentAdapter } from '../../adapters/local.js';
-import { resolveContentDir } from '../../utils.js';
+import { createAdapter } from '../../adapters/factory.js';
 import '/src/styles/global.css';
 
 interface Props {
@@ -12,8 +11,9 @@ interface Props {
 
 const { title, activeCollection } = Astro.props;
 
-const adapter = new LocalContentAdapter(resolveContentDir());
+const adapter = await createAdapter(Astro.request, Astro.locals);
 const collections = await adapter.listCollections();
+const user = Astro.locals.mimsyUser;
 ---
 
 <html lang="en">
@@ -60,17 +60,11 @@ const collections = await adapter.listCollections();
               <li>
                 <a
                   href={`${config.basePath}/${col}`}
-                  class:list={[
-                    'group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium transition-all duration-150',
-                    isActive
-                      ? 'bg-stone-800/80 text-stone-50'
-                      : 'text-stone-400 hover:bg-stone-800/50 hover:text-stone-200',
-                  ]}
+                  data-collection={col}
+                  data-active={isActive ? '' : undefined}
+                  class="mimsy-nav-link group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium transition-all duration-150"
                 >
-                  <span class:list={[
-                    'w-1 h-4 rounded-full transition-all duration-150',
-                    isActive ? 'bg-violet-500' : 'bg-transparent group-hover:bg-stone-600',
-                  ]} />
+                  <span class="mimsy-nav-dot w-1 h-4 rounded-full transition-all duration-150" />
                   {col.charAt(0).toUpperCase() + col.slice(1)}
                 </a>
               </li>
@@ -81,6 +75,13 @@ const collections = await adapter.listCollections();
 
       <!-- Footer -->
       <div class="px-5 py-3.5 border-t border-stone-800/60">
+        {user ? (
+          <div class="flex items-center gap-2.5 mb-2">
+            <img src={user.avatar} alt="" class="w-6 h-6 rounded-full" />
+            <span class="text-xs text-stone-400 truncate flex-1">{user.name}</span>
+            <a href="/api/mimsy/auth/logout" class="text-[10px] text-stone-600 hover:text-stone-400 transition-colors">Logout</a>
+          </div>
+        ) : null}
         <p class="text-[10px] text-stone-600 tracking-wide">MimsyCMS <span class="text-stone-700">v0.0.1</span></p>
       </div>
     </aside>
@@ -124,6 +125,18 @@ const collections = await adapter.listCollections();
         overlay.classList.add('opacity-0', 'pointer-events-none');
       }
     });
+    // Update active nav highlight after view transition (sidebar is transition:persist)
+    function updateSidebarActive() {
+      const path = window.location.pathname;
+      document.querySelectorAll('.mimsy-nav-link').forEach((link) => {
+        const href = link.getAttribute('href');
+        if (!href) return;
+        const isActive = path === href || path.startsWith(href + '/');
+        if (isActive) link.setAttribute('data-active', '');
+        else link.removeAttribute('data-active');
+      });
+    }
+    document.addEventListener('astro:after-swap', updateSidebarActive);
   </script>
 </body>
 </html>
@@ -427,5 +440,27 @@ const collections = await adapter.listCollections();
   }
   .mimsy-search-wrapper .mimsy-input {
     padding-left: 2.25rem;
+  }
+
+  /* ── Sidebar Nav Active State ── */
+  .mimsy-nav-link {
+    color: #a8a29e; /* stone-400 */
+  }
+  .mimsy-nav-link:hover {
+    background-color: rgba(41, 37, 36, 0.5); /* stone-800/50 */
+    color: #e7e5e4; /* stone-200 */
+  }
+  .mimsy-nav-dot {
+    background-color: transparent;
+  }
+  .mimsy-nav-link:hover .mimsy-nav-dot {
+    background-color: #57534e; /* stone-600 */
+  }
+  .mimsy-nav-link[data-active] {
+    background-color: rgba(41, 37, 36, 0.8); /* stone-800/80 */
+    color: #fafaf9; /* stone-50 */
+  }
+  .mimsy-nav-link[data-active] .mimsy-nav-dot {
+    background-color: #8b5cf6; /* violet-500 */
   }
 </style>

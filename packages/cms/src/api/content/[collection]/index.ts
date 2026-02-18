@@ -1,15 +1,14 @@
 import type { APIRoute } from 'astro';
-import { LocalContentAdapter } from '../../../adapters/local.js';
-import { resolveContentDir } from '../../../utils.js';
+import { createAdapter } from '../../../adapters/factory.js';
 
 /** GET /api/mimsy/content/[collection] — list entries (lightweight, no body) */
-export const GET: APIRoute = async ({ params }) => {
+export const GET: APIRoute = async ({ params, request, locals }) => {
   const { collection } = params;
   if (!collection) {
     return new Response(JSON.stringify({ error: 'Missing collection' }), { status: 400 });
   }
 
-  const adapter = new LocalContentAdapter(resolveContentDir());
+  const adapter = await createAdapter(request, locals);
   const entries = await adapter.listEntries(collection);
 
   const list = entries.map((e) => ({
@@ -24,7 +23,7 @@ export const GET: APIRoute = async ({ params }) => {
 };
 
 /** POST /api/mimsy/content/[collection] — create entry */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async ({ params, request, locals }) => {
   const { collection } = params;
   if (!collection) {
     return new Response(JSON.stringify({ error: 'Missing collection' }), { status: 400 });
@@ -37,7 +36,7 @@ export const POST: APIRoute = async ({ params, request }) => {
     return new Response(JSON.stringify({ error: 'Missing slug or frontmatter' }), { status: 400 });
   }
 
-  const adapter = new LocalContentAdapter(resolveContentDir());
+  const adapter = await createAdapter(request, locals);
 
   const existing = await adapter.getEntry(collection, slug);
   if (existing) {
