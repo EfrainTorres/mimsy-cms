@@ -18,3 +18,9 @@ declare module 'virtual:mimsy/validators' {
   const validators: Record<string, ZodTypeAny>;
   export default validators;
 }
+
+declare module 'virtual:mimsy/pages' {
+  import type { PageInfo } from '@mimsy/cms/src/types.js';
+  const pages: PageInfo[];
+  export default pages;
+}

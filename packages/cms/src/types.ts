@@ -21,6 +21,14 @@ export interface ContentEntry {
   rawContent: string;
 }
 
+/** A single variant in a discriminated-union block array */
+export interface BlockVariant {
+  type: string;
+  label: string;
+  fields: SchemaField[];
+  defaultItem: Record<string, unknown>;
+}
+
 /** Describes a single field introspected from a Zod schema */
 export interface SchemaField {
   name: string;
@@ -33,6 +41,13 @@ export interface SchemaField {
   referenceCollection?: string;
   /** For array fields — the element type */
   arrayItemType?: Omit<SchemaField, 'name' | 'required'>;
+  /** For object fields — nested field descriptors */
+  objectFields?: SchemaField[];
+  /** For array items that are discriminated unions */
+  blockConfig?: {
+    discriminator: string;
+    variants: BlockVariant[];
+  };
 }
 
 /** Schema field map for a collection: field name → field info */
@@ -63,6 +78,8 @@ export interface PageTextField {
   offset: number;
   length: number;
   multiline: boolean;
+  /** Section-level ancestor group. Empty string for ungrouped fields. */
+  group: string;
 }
 
 /** Scanned .astro page for sidebar */

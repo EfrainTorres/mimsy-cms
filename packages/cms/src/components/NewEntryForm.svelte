@@ -1,6 +1,9 @@
 <script>
   import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
+  import SeoPreview from './SeoPreview.svelte';
+  import FieldRenderer from './FieldRenderer.svelte';
+  import { formatLabel } from '../utils/format-label.js';
 
   let {
     collection,
@@ -27,16 +30,34 @@
 
   let extraFields = $state({});
 
+  function generateObjectDefaults(fields) {
+    const obj = {};
+    for (const f of fields) {
+      if (f.defaultValue !== undefined) { obj[f.name] = JSON.parse(JSON.stringify(f.defaultValue)); continue; }
+      if (!f.required) continue;
+      if (f.type === 'string' || f.type === 'reference') obj[f.name] = '';
+      else if (f.type === 'number') obj[f.name] = 0;
+      else if (f.type === 'boolean') obj[f.name] = false;
+      else if (f.type === 'date') obj[f.name] = new Date().toISOString().split('T')[0];
+      else if (f.type === 'array') obj[f.name] = [];
+      else if (f.type === 'object' && f.objectFields) obj[f.name] = generateObjectDefaults(f.objectFields);
+      else obj[f.name] = '';
+    }
+    return obj;
+  }
+
   $effect(() => {
     const defaults = {};
     for (const field of schemaFields) {
       if (field.name === 'title' || field.name === 'name') continue;
       if (field.defaultValue !== undefined) {
-        defaults[field.name] = field.defaultValue;
+        defaults[field.name] = JSON.parse(JSON.stringify(field.defaultValue));
       } else if (field.type === 'boolean') {
         defaults[field.name] = false;
       } else if (field.type === 'array') {
         defaults[field.name] = [];
+      } else if (field.type === 'object' && field.objectFields) {
+        defaults[field.name] = generateObjectDefaults(field.objectFields);
       } else {
         defaults[field.name] = '';
       }
@@ -45,7 +66,7 @@
       for (const [key, value] of Object.entries(templateFrontmatter)) {
         if (key === 'title' || key === 'name' || key === 'draft') continue;
         if (value !== undefined && value !== '') {
-          defaults[key] = value;
+          defaults[key] = JSON.parse(JSON.stringify(value));
         }
       }
     }
@@ -89,24 +110,49 @@
     slugManuallyEdited = true;
   }
 
+  // SEO field detection — unambiguous names only
+  const SEO_NAMES = new Set([
+    'metatitle', 'seotitle', 'ogtitle',
+    'metadescription', 'seodescription', 'ogdescription',
+    'ogimage', 'socialimage',
+    'canonicalurl', 'canonical',
+    'noindex', 'nofollow', 'robots',
+  ]);
+
+  function isSeoField(key) {
+    return SEO_NAMES.has(key.toLowerCase().replace(/[-_]/g, ''));
+  }
+
   function getFieldDef(key) {
     return schemaFields.find((f) => f.name === key);
   }
 
   function getExtraFieldKeys() {
     if (schemaFields.length > 0) {
-      return schemaFields.map((f) => f.name).filter((k) => k !== 'title' && k !== 'name' && k !== 'draft');
+      return schemaFields.map((f) => f.name).filter((k) => k !== 'title' && k !== 'name' && k !== 'draft' && !isSeoField(k));
     }
     return [];
   }
+
+  function getSeoFieldKeys() {
+    if (schemaFields.length > 0) {
+      return schemaFields.map((f) => f.name).filter((k) => isSeoField(k));
+    }
+    return [];
+  }
+
+  let seoFieldData = $derived(
+    getSeoFieldKeys().map(key => ({
+      key,
+      fieldDef: getFieldDef(key),
+      fieldType: getFieldDef(key)?.type || 'string',
+    }))
+  );
 
   function handleFieldChange(key, value) {
     extraFields = { ...extraFields, [key]: value };
   }
 
-  function handleArrayFieldChange(key, rawValue) {
-    extraFields = { ...extraFields, [key]: rawValue.split(',').map((s) => s.trim()).filter(Boolean) };
-  }
 
   async function create() {
     const trimmedTitle = title.trim();
@@ -119,9 +165,11 @@
 
     const frontmatter = { title: trimmedTitle, draft: true };
     for (const [key, value] of Object.entries(extraFields)) {
-      if (value !== '' && value !== undefined) {
-        frontmatter[key] = value;
-      }
+      if (value === '' || value === undefined) continue;
+      const def = schemaFields.find(f => f.name === key);
+      if (!def?.required && Array.isArray(value) && value.length === 0) continue;
+      if (!def?.required && typeof value === 'object' && !Array.isArray(value) && value !== null && Object.keys(value).length === 0) continue;
+      frontmatter[key] = value;
     }
 
     try {
@@ -232,67 +280,18 @@
       {#if fieldDef}
         <div>
           <label class="mimsy-label" for={`field-${key}`}>
-            {key}
+            {formatLabel(key)}
             {#if !fieldDef.required}
               <span class="text-stone-300 font-normal normal-case tracking-normal">&middot; optional</span>
             {/if}
           </label>
-
-          {#if fieldDef.type === 'boolean'}
-            <label class="inline-flex items-center gap-2.5 cursor-pointer group">
-              <span class="relative inline-flex items-center">
-                <input
-                  type="checkbox"
-                  id={`field-${key}`}
-                  checked={!!extraFields[key]}
-                  onchange={(e) => handleFieldChange(key, e.target.checked)}
-                  class="peer sr-only"
-                />
-                <span class="w-8 h-5 rounded-full bg-stone-200 peer-checked:bg-violet-500 transition-colors"></span>
-                <span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transform peer-checked:translate-x-3 transition-transform"></span>
-              </span>
-              <span class="text-sm text-stone-600">{extraFields[key] ? 'Yes' : 'No'}</span>
-            </label>
-
-          {:else if fieldDef.type === 'enum' && fieldDef.enumValues}
-            <select
-              id={`field-${key}`}
-              value={extraFields[key] ?? ''}
-              onchange={(e) => handleFieldChange(key, e.target.value)}
-              class="mimsy-select"
-            >
-              {#if !fieldDef.required}<option value="">None</option>{/if}
-              {#each fieldDef.enumValues as val}<option value={val}>{val}</option>{/each}
-            </select>
-
-          {:else if fieldDef.type === 'reference'}
-            {@const options = referenceOptions[fieldDef.referenceCollection] ?? referenceOptions[key] ?? []}
-            {#if options.length > 0}
-              <select
-                id={`field-${key}`}
-                value={extraFields[key] ?? ''}
-                onchange={(e) => handleFieldChange(key, e.target.value)}
-                class="mimsy-select"
-              >
-                {#if !fieldDef.required}<option value="">None</option>{/if}
-                {#each options as opt}<option value={opt.slug}>{opt.label}</option>{/each}
-              </select>
-            {:else}
-              <input type="text" id={`field-${key}`} value={extraFields[key] ?? ''} oninput={(e) => handleFieldChange(key, e.target.value)} class="mimsy-input" placeholder="Reference slug" />
-            {/if}
-
-          {:else if fieldDef.type === 'array'}
-            <input type="text" id={`field-${key}`} value={Array.isArray(extraFields[key]) ? extraFields[key].join(', ') : ''} oninput={(e) => handleArrayFieldChange(key, e.target.value)} class="mimsy-input" placeholder="Comma-separated values" />
-
-          {:else if fieldDef.type === 'date'}
-            <input type="date" id={`field-${key}`} value={extraFields[key] ?? ''} oninput={(e) => handleFieldChange(key, e.target.value)} class="mimsy-input max-w-xs" />
-
-          {:else if fieldDef.type === 'number'}
-            <input type="number" id={`field-${key}`} value={extraFields[key] ?? ''} oninput={(e) => handleFieldChange(key, Number(e.target.value))} class="mimsy-input" />
-
-          {:else}
-            <input type="text" id={`field-${key}`} value={extraFields[key] ?? ''} oninput={(e) => handleFieldChange(key, e.target.value)} class="mimsy-input" />
-          {/if}
+          <FieldRenderer
+            {fieldDef}
+            value={extraFields[key]}
+            onchange={(v) => handleFieldChange(key, v)}
+            {referenceOptions}
+            fieldId={`field-${key}`}
+          />
         </div>
       {/if}
     {/each}
@@ -309,8 +308,21 @@
     </div>
   {/if}
 
+  <!-- SEO -->
+  <SeoPreview
+    title={title}
+    description={extraFields.description || ''}
+    slug={slug}
+    {collection}
+    {basePath}
+    seoFields={seoFieldData}
+    frontmatter={{ title, ...extraFields }}
+    onFieldChange={handleFieldChange}
+    {referenceOptions}
+  />
+
   <!-- Actions -->
-  <div class="flex items-center gap-3">
+  <div class="flex items-center gap-3 mt-5">
     <button onclick={create} disabled={creating} class="mimsy-btn-primary">
       {creating ? 'Creating...' : 'Create Entry'}
     </button>

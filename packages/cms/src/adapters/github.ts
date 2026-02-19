@@ -187,6 +187,14 @@ export class GitHubContentAdapter implements ContentAdapter {
     return this.fetchFileContent(fullPath);
   }
 
+  async getProjectFile(path: string): Promise<string | null> {
+    return this.fetchFileContent(path);
+  }
+
+  async writeProjectFile(path: string, content: string): Promise<void> {
+    await this.commitFile(path, content, 'utf-8', `Update page: ${path}`);
+  }
+
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------

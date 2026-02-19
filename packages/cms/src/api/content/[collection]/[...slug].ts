@@ -30,7 +30,10 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
-  const body = await request.json();
+  let body: any;
+  try { body = await request.json(); } catch {
+    return new Response(JSON.stringify({ error: 'Invalid JSON body' }), { status: 400 });
+  }
   const { frontmatter, content } = body;
 
   if (!frontmatter) {

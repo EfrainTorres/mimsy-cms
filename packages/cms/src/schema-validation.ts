@@ -106,6 +106,26 @@ function cleanSchema(schema: any): ZodTypeAny {
     return schema;
   }
 
+  // ZodDiscriminatedUnion — recurse into each option (Array or Map safe)
+  if (typeName === 'ZodDiscriminatedUnion') {
+    const disc = schema._def.discriminator;
+    const raw = schema._def.options;
+    const opts: any[] = Array.isArray(raw) ? raw : raw instanceof Map ? [...raw.values()] : [];
+    const cleaned = opts.map((opt: any) => cleanSchema(opt));
+    return z.discriminatedUnion(disc, cleaned as any) as ZodTypeAny;
+  }
+
+  // ZodUnion — recurse into each option
+  if (typeName === 'ZodUnion') {
+    const cleaned = (schema._def.options ?? []).map((opt: any) => cleanSchema(opt));
+    return z.union(cleaned as any) as ZodTypeAny;
+  }
+
+  // ZodLiteral — keep as-is
+  if (typeName === 'ZodLiteral') {
+    return schema;
+  }
+
   // Primitives (string, number, boolean, date, enum, etc.) — keep as-is
   return schema;
 }
@@ -134,6 +154,8 @@ function isReference(schema: any): boolean {
  * Validate frontmatter against a collection's Zod schema.
  * Uses safeParseAsync to support async refinements.
  * Validates only — does NOT return parsed/coerced data.
+ * Walks error.issues to produce full dotted paths for nested fields
+ * (e.g., "sections[0].heading" instead of just "sections").
  */
 export async function validateFrontmatter(
   schema: ZodTypeAny,
@@ -145,10 +167,15 @@ export async function validateFrontmatter(
     return { success: true };
   }
 
-  const flat = result.error.flatten();
-  return {
-    success: false,
-    error: 'Validation failed',
-    fieldErrors: flat.fieldErrors as Record<string, string[]>,
-  };
+  const fieldErrors: Record<string, string[]> = {};
+  for (const issue of result.error.issues) {
+    const pathStr = issue.path.reduce((acc: string, seg, i) => {
+      if (typeof seg === 'number') return `${acc}[${seg}]`;
+      return i === 0 ? String(seg) : `${acc}.${seg}`;
+    }, '') || '_root';
+    if (!fieldErrors[pathStr]) fieldErrors[pathStr] = [];
+    fieldErrors[pathStr].push(issue.message);
+  }
+
+  return { success: false, error: 'Validation failed', fieldErrors };
 }

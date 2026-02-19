@@ -1,13 +1,18 @@
 ---
 import { getEntry, render } from 'astro:content';
-import Base from '../layouts/Base.astro';
+import Base from '../../layouts/Base.astro';
 
-const home = await getEntry('pages', 'home');
-const sections = home?.data.sections ?? [];
-const Content = home ? (await render(home)).Content : null;
+const { slug } = Astro.params;
+if (!slug) return Astro.redirect('/');
+
+const page = await getEntry('pages', slug);
+if (!page) return new Response(null, { status: 404 });
+
+const sections = page.data.sections ?? [];
+const { Content } = await render(page);
 ---
 
-<Base title={home?.data.title ?? 'Home'} description={home?.data.description}>
+<Base title={page.data.title} description={page.data.description}>
   {sections.map((section) => {
     if (section.type === 'hero') return (
       <section class="bg-gradient-to-b from-violet-50 to-stone-50 py-24">
@@ -46,11 +51,9 @@ const Content = home ? (await render(home)).Content : null;
     );
   })}
 
-  {Content && (
-    <section class="py-16">
-      <div class="max-w-3xl mx-auto px-6 prose prose-stone">
-        <Content />
-      </div>
-    </section>
-  )}
+  <section class="py-16">
+    <div class="max-w-3xl mx-auto px-6 prose prose-stone">
+      <Content />
+    </div>
+  </section>
 </Base>

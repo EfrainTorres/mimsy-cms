@@ -11,6 +11,9 @@ const RESOLVED_SCHEMAS = '\0' + VIRTUAL_SCHEMAS;
 const VIRTUAL_VALIDATORS = 'virtual:mimsy/validators';
 const RESOLVED_VALIDATORS = '\0' + VIRTUAL_VALIDATORS;
 
+const VIRTUAL_PAGES = 'virtual:mimsy/pages';
+const RESOLVED_PAGES = '\0' + VIRTUAL_PAGES;
+
 export function vitePluginMimsy(
   mimsyConfig: ResolvedMimsyConfig,
   astroConfig: AstroConfig
@@ -61,17 +64,31 @@ try {
 export default validators;
 `;
 
+  const pagesDir = `${srcDir}/pages`;
+  const pagesModule = `
+import { scanPagesDirectory } from '@mimsy/cms/src/page-scanner.js';
+let pages = [];
+try {
+  pages = scanPagesDirectory(${JSON.stringify(pagesDir)}, ${JSON.stringify(mimsyConfig.basePath)});
+} catch (e) {
+  console.warn('[mimsy] Could not scan pages:', e?.message ?? e);
+}
+export default pages;
+`;
+
   return {
     name: 'vite-plugin-mimsy',
     resolveId(id) {
       if (id === VIRTUAL_CONFIG) return RESOLVED_CONFIG;
       if (id === VIRTUAL_SCHEMAS) return RESOLVED_SCHEMAS;
       if (id === VIRTUAL_VALIDATORS) return RESOLVED_VALIDATORS;
+      if (id === VIRTUAL_PAGES) return RESOLVED_PAGES;
     },
     load(id) {
       if (id === RESOLVED_CONFIG) return configModule;
       if (id === RESOLVED_SCHEMAS) return schemasModule;
       if (id === RESOLVED_VALIDATORS) return validatorsModule;
+      if (id === RESOLVED_PAGES) return pagesModule;
     },
   };
 }

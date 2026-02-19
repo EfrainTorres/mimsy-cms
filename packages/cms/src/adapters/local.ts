@@ -145,6 +145,19 @@ export class LocalContentAdapter implements ContentAdapter {
     return readFile(fullPath, 'utf-8');
   }
 
+  async getProjectFile(path: string): Promise<string | null> {
+    const projectRoot = dirname(dirname(this.contentDir));
+    const fullPath = join(projectRoot, path);
+    if (!existsSync(fullPath)) return null;
+    return readFile(fullPath, 'utf-8');
+  }
+
+  async writeProjectFile(path: string, content: string): Promise<void> {
+    const projectRoot = dirname(dirname(this.contentDir));
+    const fullPath = join(projectRoot, path);
+    await writeFile(fullPath, content, 'utf-8');
+  }
+
   private async isJsonCollection(collection: string): Promise<boolean> {
     const dir = join(this.contentDir, collection);
     if (!existsSync(dir)) return false;

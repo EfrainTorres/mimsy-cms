@@ -13,6 +13,7 @@
     "tailwindcss": "^4.0.0"
   },
   "dependencies": {
+    "@astrojs/compiler": "^2.0.0",
     "@tiptap/core": "^3.0.0",
     "@tiptap/extension-image": "^3.0.0",
     "@tiptap/extension-link": "^3.0.0",

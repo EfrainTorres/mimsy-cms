@@ -10,6 +10,9 @@ importers:
 
   packages/cms:
     dependencies:
+      '@astrojs/compiler':
+        specifier: ^2.0.0
+        version: 2.13.1
       '@tiptap/core':
         specifier: ^3.0.0
         version: 3.19.0(@tiptap/pm@3.19.0)

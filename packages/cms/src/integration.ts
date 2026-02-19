@@ -65,6 +65,7 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
 
         // Inject admin pages
         injectRoute({ pattern: base, entrypoint: '@mimsy/cms/src/pages/admin/index.astro', prerender: false });
+        injectRoute({ pattern: `${base}/_page/[...path]`, entrypoint: '@mimsy/cms/src/pages/admin/_page/[...path].astro', prerender: false });
         injectRoute({ pattern: `${base}/[collection]`, entrypoint: '@mimsy/cms/src/pages/admin/[collection]/index.astro', prerender: false });
         injectRoute({ pattern: `${base}/[collection]/new`, entrypoint: '@mimsy/cms/src/pages/admin/[collection]/new.astro', prerender: false });
         injectRoute({ pattern: `${base}/[collection]/[...slug]`, entrypoint: '@mimsy/cms/src/pages/admin/[collection]/[...slug].astro', prerender: false });
@@ -74,6 +75,7 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
         injectRoute({ pattern: '/api/mimsy/content/[collection]', entrypoint: '@mimsy/cms/src/api/content/[collection]/index.ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/content/[collection]/[...slug]', entrypoint: '@mimsy/cms/src/api/content/[collection]/[...slug].ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/upload', entrypoint: '@mimsy/cms/src/api/upload.ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/page-text/[...path]', entrypoint: '@mimsy/cms/src/api/page-text/[...path].ts', prerender: false });
 
         // Inject auth API routes
         injectRoute({ pattern: '/api/mimsy/auth/login', entrypoint: '@mimsy/cms/src/api/auth/login.ts', prerender: false });

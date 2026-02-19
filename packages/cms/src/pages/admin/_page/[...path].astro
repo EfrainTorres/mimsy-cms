@@ -1,0 +1,42 @@
+---
+import AdminLayout from '../../layouts/AdminLayout.astro';
+import config from 'virtual:mimsy/config';
+import { createAdapter } from '../../../adapters/factory.js';
+import { extractTextFields, extractCollectionRefs } from '../../../page-scanner.js';
+import PageEditor from '../../../components/PageEditor.svelte';
+
+const pagePath = Astro.params.path;
+if (!pagePath?.endsWith('.astro')) return Astro.redirect(config.basePath);
+
+// Validate path
+const normalized = pagePath.replace(/\\/g, '/');
+if (normalized.includes('..') || !/^[\w\-\/.]+\.astro$/.test(normalized)) {
+  return Astro.redirect(config.basePath);
+}
+
+const adapter = await createAdapter(Astro.request, Astro.locals);
+const source = await adapter.getProjectFile(`src/pages/${normalized}`);
+if (!source) return Astro.redirect(config.basePath);
+
+const fields = await extractTextFields(source);
+const collectionRefs = extractCollectionRefs(source);
+
+// Derive display name: "about/index.astro" → "About", "index.astro" → "Home"
+const stripped = normalized.replace(/(^|\/)index\.astro$/, '').replace(/\.astro$/, '').replace(/\/$/, '');
+const pageName = stripped === ''
+  ? 'Home'
+  : stripped.split('/').pop()!.charAt(0).toUpperCase() + stripped.split('/').pop()!.slice(1);
+const route = '/' + stripped;
+---
+
+<AdminLayout title={`Edit: ${pageName}`} activePage={normalized}>
+  <PageEditor
+    client:load
+    pagePath={normalized}
+    pageName={pageName}
+    basePath={config.basePath}
+    previewPath={route === '/' ? '/' : route}
+    initialFields={JSON.parse(JSON.stringify(fields))}
+    collectionRefs={collectionRefs}
+  />
+</AdminLayout>

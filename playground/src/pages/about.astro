@@ -1,0 +1,29 @@
+---
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+
+const authors = await getCollection('authors');
+---
+
+<Base title="About" description="Meet the team behind the project.">
+  <div class="max-w-3xl mx-auto px-6 py-16">
+    <h1 class="text-3xl font-semibold tracking-tight text-stone-900">About</h1>
+    <p class="mt-2 text-stone-500 max-w-xl">We build tools that make content management effortless for developers and authors alike.</p>
+
+    <h2 class="mt-14 text-xl font-semibold text-stone-900">The Team</h2>
+    <div class="mt-6 grid sm:grid-cols-2 gap-4">
+      {authors.map((author) => (
+        <div class="bg-white border border-stone-200 rounded-xl p-5 flex items-start gap-4">
+          <div class="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-600 font-semibold text-sm shrink-0">
+            {author.data.name.charAt(0)}
+          </div>
+          <div>
+            <p class="font-semibold text-stone-900">{author.data.name}</p>
+            <p class="text-sm text-stone-400">{author.data.email}</p>
+            {author.data.bio && <p class="mt-2 text-sm text-stone-500">{author.data.bio}</p>}
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</Base>

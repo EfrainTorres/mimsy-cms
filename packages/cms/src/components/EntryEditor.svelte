@@ -3,6 +3,8 @@
   import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
   import SeoPreview from './SeoPreview.svelte';
+  import FieldRenderer from './FieldRenderer.svelte';
+  import { formatLabel } from '../utils/format-label.js';
 
   /**
    * @typedef {Object} SchemaField
@@ -40,6 +42,26 @@
     typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-preview') === 'open'
   );
 
+  // Raw code view
+  let showRaw = $state(false);
+
+  function copyRaw() {
+    const fm = JSON.stringify(JSON.parse(JSON.stringify(frontmatter)), null, 2);
+    const text = isDataCollection ? fm : `${fm}\n\n---\n\n${bodyContent}`;
+    navigator.clipboard.writeText(text).then(
+      () => toast('Copied to clipboard', 'success'),
+      () => toast('Failed to copy', 'error'),
+    );
+  }
+  let previewAvailable = $state(/** @type {'unknown'|'yes'|'no'} */ ('unknown'));
+
+  // Check if the preview route exists (same-origin HEAD request)
+  if (typeof window !== 'undefined') {
+    fetch(previewPath, { method: 'HEAD' })
+      .then(r => { previewAvailable = r.ok ? 'yes' : 'no'; })
+      .catch(() => { previewAvailable = 'no'; });
+  }
+
   function toast(message, type) {
     window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
   }
@@ -57,6 +79,19 @@
     if (autosaveTimer) clearTimeout(autosaveTimer);
     if (saveController) saveController.abort();
   });
+
+  // SEO field detection — unambiguous names only
+  const SEO_NAMES = new Set([
+    'metatitle', 'seotitle', 'ogtitle',
+    'metadescription', 'seodescription', 'ogdescription',
+    'ogimage', 'socialimage',
+    'canonicalurl', 'canonical',
+    'noindex', 'nofollow', 'robots',
+  ]);
+
+  function isSeoField(key) {
+    return SEO_NAMES.has(key.toLowerCase().replace(/[-_]/g, ''));
+  }
 
   function getFieldDef(key) {
     return schemaFields.find((f) => f.name === key);
@@ -82,15 +117,32 @@
     return Object.keys(frontmatter);
   }
 
+  function isBlockField(key) {
+    const def = getFieldDef(key);
+    return def?.type === 'array' && !!def?.arrayItemType?.blockConfig;
+  }
+
+  function getBlockFieldKeys() {
+    return getFieldKeys().filter(k => isBlockField(k));
+  }
+
+  function getRegularFieldKeys() {
+    return getFieldKeys().filter(k => !isSeoField(k) && !isBlockField(k));
+  }
+
+  let seoFieldData = $derived(
+    getFieldKeys().filter(k => isSeoField(k)).map(key => ({
+      key,
+      fieldDef: getFieldDef(key),
+      fieldType: getFieldType(key, frontmatter[key]),
+    }))
+  );
+
   function handleFieldChange(key, value) {
     frontmatter[key] = value;
     scheduleAutosave();
   }
 
-  function handleArrayFieldChange(key, rawValue) {
-    frontmatter[key] = rawValue.split(',').map((s) => s.trim()).filter(Boolean);
-    scheduleAutosave();
-  }
 
   async function save(manual = true) {
     if (autosaveTimer) clearTimeout(autosaveTimer);
@@ -196,114 +248,23 @@
   <div class="mimsy-card p-5">
     <p class="mimsy-section-title">Fields</p>
     <div class="space-y-4">
-      {#each getFieldKeys() as key}
-        {@const fieldType = getFieldType(key, frontmatter[key])}
+      {#each getRegularFieldKeys() as key}
         {@const fieldDef = getFieldDef(key)}
+        {@const fieldType = getFieldType(key, frontmatter[key])}
         <div>
           <label class="mimsy-label" for={`field-${key}`}>
-            {key}
+            {formatLabel(key)}
             {#if fieldDef && !fieldDef.required}
               <span class="text-stone-300 font-normal normal-case tracking-normal">&middot; optional</span>
             {/if}
           </label>
-
-          {#if fieldType === 'boolean'}
-            <label class="inline-flex items-center gap-2.5 cursor-pointer group">
-              <span class="relative inline-flex items-center">
-                <input
-                  type="checkbox"
-                  id={`field-${key}`}
-                  checked={!!frontmatter[key]}
-                  onchange={(e) => handleFieldChange(key, e.target.checked)}
-                  class="peer sr-only"
-                />
-                <span class="w-8 h-5 rounded-full bg-stone-200 peer-checked:bg-violet-500 transition-colors"></span>
-                <span class="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transform peer-checked:translate-x-3 transition-transform"></span>
-              </span>
-              <span class="text-sm text-stone-600">{frontmatter[key] ? 'Yes' : 'No'}</span>
-            </label>
-
-          {:else if fieldType === 'enum' && fieldDef?.enumValues}
-            <select
-              id={`field-${key}`}
-              value={frontmatter[key] ?? ''}
-              onchange={(e) => handleFieldChange(key, e.target.value)}
-              class="mimsy-select"
-            >
-              {#if !fieldDef.required}
-                <option value="">None</option>
-              {/if}
-              {#each fieldDef.enumValues as val}
-                <option value={val}>{val}</option>
-              {/each}
-            </select>
-
-          {:else if fieldType === 'reference'}
-            {@const options = referenceOptions[fieldDef?.referenceCollection] ?? referenceOptions[key] ?? []}
-            {#if options.length > 0}
-              <select
-                id={`field-${key}`}
-                value={frontmatter[key] ?? ''}
-                onchange={(e) => handleFieldChange(key, e.target.value)}
-                class="mimsy-select"
-              >
-                {#if !fieldDef?.required}
-                  <option value="">None</option>
-                {/if}
-                {#each options as opt}
-                  <option value={opt.slug}>{opt.label}</option>
-                {/each}
-              </select>
-            {:else}
-              <input
-                type="text"
-                id={`field-${key}`}
-                value={frontmatter[key] ?? ''}
-                oninput={(e) => handleFieldChange(key, e.target.value)}
-                class="mimsy-input"
-                placeholder="Reference slug"
-              />
-            {/if}
-
-          {:else if fieldType === 'array'}
-            <input
-              type="text"
-              id={`field-${key}`}
-              value={Array.isArray(frontmatter[key]) ? frontmatter[key].join(', ') : ''}
-              oninput={(e) => handleArrayFieldChange(key, e.target.value)}
-              class="mimsy-input"
-              placeholder="Comma-separated values"
-            />
-
-          {:else if fieldType === 'date'}
-            <input
-              type="date"
-              id={`field-${key}`}
-              value={frontmatter[key] instanceof Date
-                ? frontmatter[key].toISOString().split('T')[0]
-                : (frontmatter[key] ?? '').toString().split('T')[0]}
-              oninput={(e) => handleFieldChange(key, e.target.value)}
-              class="mimsy-input max-w-xs"
-            />
-
-          {:else if fieldType === 'number'}
-            <input
-              type="number"
-              id={`field-${key}`}
-              value={frontmatter[key] ?? ''}
-              oninput={(e) => handleFieldChange(key, Number(e.target.value))}
-              class="mimsy-input"
-            />
-
-          {:else}
-            <input
-              type="text"
-              id={`field-${key}`}
-              value={frontmatter[key] ?? ''}
-              oninput={(e) => handleFieldChange(key, e.target.value)}
-              class="mimsy-input"
-            />
-          {/if}
+          <FieldRenderer
+            fieldDef={fieldDef ?? { name: key, type: fieldType, required: true }}
+            value={frontmatter[key]}
+            onchange={(v) => handleFieldChange(key, v)}
+            {referenceOptions}
+            fieldId={`field-${key}`}
+          />
         </div>
       {/each}
     </div>
@@ -317,7 +278,27 @@
     {slug}
     {collection}
     {basePath}
+    seoFields={seoFieldData}
+    {frontmatter}
+    onFieldChange={handleFieldChange}
+    {referenceOptions}
   />
+{/snippet}
+
+{#snippet blockCards()}
+  {#each getBlockFieldKeys() as key}
+    {@const fieldDef = getFieldDef(key)}
+    <div class="mimsy-card p-5">
+      <p class="mimsy-section-title">{formatLabel(key)}</p>
+      <FieldRenderer
+        fieldDef={fieldDef}
+        value={frontmatter[key]}
+        onchange={(v) => handleFieldChange(key, v)}
+        {referenceOptions}
+        fieldId={`field-${key}`}
+      />
+    </div>
+  {/each}
 {/snippet}
 
 <div>
@@ -351,6 +332,9 @@
         <span class="mimsy-status-dot"></span>
         {frontmatter.draft ? 'Draft' : 'Published'}
       </button>
+      <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary" class:ring-2={showRaw} class:ring-violet-400={showRaw} title={showRaw ? 'Show form' : 'View raw data'}>
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
+      </button>
       {#if !isDataCollection}
         <button onclick={togglePreview} class="mimsy-btn-secondary" title={previewOpen ? 'Close preview' : 'Open preview'}>
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
@@ -364,7 +348,25 @@
   </div>
 
   <div class="mimsy-editor-wrap">
-    {#if !isDataCollection}
+    {#if showRaw}
+      <!-- Raw data view -->
+      <div class="max-w-3xl">
+        <div class="mimsy-card p-5">
+          <div class="flex items-center justify-between mb-3">
+            <p class="mimsy-section-title" style="margin-bottom:0">Raw Data</p>
+            <button onclick={copyRaw} class="text-xs text-stone-400 hover:text-stone-600 font-medium transition-colors" style="border:none;background:none;cursor:pointer;">Copy</button>
+          </div>
+          {#if !isDataCollection}
+            <p class="text-[10px] font-medium text-stone-400 uppercase tracking-wider mb-1.5">Frontmatter</p>
+          {/if}
+          <pre class="text-xs font-mono leading-relaxed text-stone-600 bg-stone-50 border border-stone-100 rounded-lg p-4 overflow-auto max-h-[50vh] whitespace-pre-wrap break-all">{JSON.stringify(JSON.parse(JSON.stringify(frontmatter)), null, 2)}</pre>
+          {#if !isDataCollection}
+            <p class="text-[10px] font-medium text-stone-400 uppercase tracking-wider mb-1.5 mt-4">Body</p>
+            <pre class="text-xs font-mono leading-relaxed text-stone-600 bg-stone-50 border border-stone-100 rounded-lg p-4 overflow-auto max-h-[40vh] whitespace-pre-wrap break-all">{bodyContent || '(empty)'}</pre>
+          {/if}
+        </div>
+      </div>
+    {:else if !isDataCollection}
       <!-- Two-column layout for content collections (xl+ = 1280px) -->
       <div class="xl:grid xl:grid-cols-3 xl:gap-6">
         <!-- Sidebar: fields + SEO -->
@@ -372,11 +374,14 @@
           <div class="xl:sticky xl:top-6 space-y-5">
             {@render fieldsCard()}
             {@render seoCard()}
+            {#if previewAvailable === 'no'}
+              <p class="text-[11px] text-stone-400 leading-relaxed px-1">No frontend route found for <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">/{collection}/{slug}</code>. Create <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">src/pages/{collection}/[...slug].astro</code> to enable preview.</p>
+            {/if}
           </div>
         </div>
 
-        <!-- Main: content editor -->
-        <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1">
+        <!-- Main: content editor + blocks -->
+        <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1 space-y-5">
           <div class="mimsy-card p-5">
             <p class="mimsy-section-title">Content</p>
             <TiptapEditor
@@ -384,6 +389,7 @@
               onchange={(md) => { bodyContent = md; scheduleAutosave(); }}
             />
           </div>
+          {@render blockCards()}
         </div>
       </div>
 
@@ -396,13 +402,23 @@
           </button>
         </div>
         {#if previewOpen}
-          <iframe id="mimsy-preview-frame" src={previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
+          {#if previewAvailable === 'no'}
+            <div class="flex-1 flex items-center justify-center p-6">
+              <div class="text-center max-w-xs">
+                <p class="text-xs text-stone-400 leading-relaxed">No preview route found. Create a page to enable preview:</p>
+                <code class="block mt-2 text-[11px] text-stone-500 bg-stone-800/50 rounded px-2.5 py-1.5 font-mono">src/pages/{collection}/[...slug].astro</code>
+              </div>
+            </div>
+          {:else}
+            <iframe id="mimsy-preview-frame" src={previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
+          {/if}
         {/if}
       </div>
     {:else}
       <!-- Single column for data collections -->
       <div class="max-w-2xl space-y-5">
         {@render fieldsCard()}
+        {@render blockCards()}
         {@render seoCard()}
       </div>
     {/if}

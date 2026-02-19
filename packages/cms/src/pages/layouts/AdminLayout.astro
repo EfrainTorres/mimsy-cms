@@ -1,15 +1,17 @@
 ---
 import { ClientRouter } from 'astro:transitions';
 import config from 'virtual:mimsy/config';
+import pages from 'virtual:mimsy/pages';
 import { createAdapter } from '../../adapters/factory.js';
 import '/src/styles/global.css';
 
 interface Props {
   title: string;
   activeCollection?: string;
+  activePage?: string;
 }
 
-const { title, activeCollection } = Astro.props;
+const { title, activeCollection, activePage } = Astro.props;
 
 const adapter = await createAdapter(Astro.request, Astro.locals);
 const collections = await adapter.listCollections();
@@ -20,6 +22,7 @@ const user = Astro.locals.mimsyUser;
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <title>{title} | MimsyCMS</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -52,6 +55,29 @@ const user = Astro.locals.mimsyUser;
 
       <!-- Navigation -->
       <nav class="flex-1 px-3 pt-5 pb-3 overflow-y-auto">
+        {pages.length > 0 && (
+          <>
+            <p class="px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-500">Site Pages</p>
+            <ul class="space-y-0.5 mb-4">
+              {pages.map((page) => {
+                const isActive = activePage === page.path;
+                return (
+                  <li>
+                    <a
+                      href={`${config.basePath}/_page/${page.path}`}
+                      data-page={page.path}
+                      data-active={isActive ? '' : undefined}
+                      class="mimsy-nav-link group flex items-center gap-2.5 px-2.5 py-2 rounded-lg text-[13px] font-medium transition-all duration-150"
+                    >
+                      <span class="mimsy-nav-dot w-1 h-4 rounded-full transition-all duration-150" />
+                      {page.name}
+                    </a>
+                  </li>
+                );
+              })}
+            </ul>
+          </>
+        )}
         <p class="px-2 mb-2 text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-500">Collections</p>
         <ul class="space-y-0.5">
           {collections.map((col) => {

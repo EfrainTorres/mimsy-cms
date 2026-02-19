@@ -21,22 +21,38 @@ const isDataCollection = entry.body === '' && entry.rawContent.trim().startsWith
 // Get schema fields for this collection (if available)
 const schemaFields = schemas[collection] ?? [];
 
-// Build reference options for any reference fields
-const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
-for (const field of schemaFields) {
-  if (field.type === 'reference' && field.referenceCollection && field.referenceCollection !== '__unknown__') {
-    const refCollection = field.referenceCollection;
-    if (!referenceOptions[refCollection]) {
-      try {
-        const refEntries = await adapter.listEntries(refCollection);
-        referenceOptions[refCollection] = refEntries.map((e) => ({
-          slug: e.slug,
-          label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
-        }));
-      } catch {
-        referenceOptions[refCollection] = [];
+// Recursively collect all reference collections from schema fields
+function collectReferenceCollections(fields: typeof schemaFields): Set<string> {
+  const refs = new Set<string>();
+  for (const f of fields) {
+    if (f.type === 'reference' && f.referenceCollection && f.referenceCollection !== '__unknown__') {
+      refs.add(f.referenceCollection);
+    }
+    if (f.objectFields) {
+      for (const r of collectReferenceCollections(f.objectFields)) refs.add(r);
+    }
+    if (f.arrayItemType?.blockConfig) {
+      for (const v of f.arrayItemType.blockConfig.variants) {
+        for (const r of collectReferenceCollections(v.fields)) refs.add(r);
       }
     }
+    if (f.arrayItemType?.objectFields) {
+      for (const r of collectReferenceCollections(f.arrayItemType.objectFields)) refs.add(r);
+    }
+  }
+  return refs;
+}
+
+const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
+for (const refCollection of collectReferenceCollections(schemaFields)) {
+  try {
+    const refEntries = await adapter.listEntries(refCollection);
+    referenceOptions[refCollection] = refEntries.map((e) => ({
+      slug: e.slug,
+      label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
+    }));
+  } catch {
+    referenceOptions[refCollection] = [];
   }
 }
 ---
