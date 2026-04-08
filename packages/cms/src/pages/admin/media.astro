@@ -1,0 +1,30 @@
+---
+import AdminLayout from '../layouts/AdminLayout.astro';
+import MediaLibrary from '../../components/MediaLibrary.svelte';
+import config from 'virtual:mimsy/config';
+import { getEnv } from '../../adapters/factory.js';
+
+const isGitHubMode = !!getEnv('MIMSY_GITHUB_REPO');
+const isR2 = config.media?.storage === 'r2';
+
+// GitHub mode without R2 — media library unsupported, redirect home
+if (isGitHubMode && !isR2) {
+  return Astro.redirect(config.basePath);
+}
+---
+
+<AdminLayout title="Media">
+  <div class="mb-8">
+    <h1 class="mimsy-page-heading">Media</h1>
+    <p class="text-sm text-stone-500 mt-1">
+      {isR2 ? 'Files stored in Cloudflare R2.' : 'Files stored in src/assets/uploads/.'}
+    </p>
+  </div>
+
+  <MediaLibrary
+    mode="library"
+    basePath={config.basePath}
+    isR2={isR2}
+    client:only="svelte"
+  />
+</AdminLayout>

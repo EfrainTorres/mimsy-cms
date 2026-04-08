@@ -4,6 +4,7 @@
    * Handles scalars, nested objects, repeaters (array of objects),
    * and block arrays (discriminated union / union with common literal).
    */
+  import { getContext } from 'svelte';
   import FieldRenderer from './FieldRenderer.svelte';
   import { formatLabel } from '../utils/format-label.js';
 
@@ -15,6 +16,17 @@
     fieldId = '',
     depth = 0,
   } = $props();
+
+  // basePath is provided via context by EntryEditor / NewEntryForm so it
+  // doesn't have to be threaded through every recursive FieldRenderer call.
+  const basePath = getContext('mimsyBasePath') ?? '';
+
+  // Reference picker state (per-instance: each FieldRenderer has its own)
+  let refQuery = $state('');
+  let refOpen = $state(false);
+
+  // Focus action for search inputs in dropdown
+  function focusEl(node) { node.focus(); }
 
   // Block add dropdown
   let showBlockMenu = $state(false);
@@ -38,14 +50,21 @@
   function removeItem(index) {
     const next = [...value];
     next.splice(index, 1);
-    // Shift collapsed state
+    // Shift collapsed and showCode states
     const newCollapsed = {};
+    const newShowCode = {};
     for (const [k, v] of Object.entries(collapsed)) {
       const ki = Number(k);
       if (ki < index) newCollapsed[ki] = v;
       else if (ki > index) newCollapsed[ki - 1] = v;
     }
+    for (const [k, v] of Object.entries(showCode)) {
+      const ki = Number(k);
+      if (ki < index) newShowCode[ki] = v;
+      else if (ki > index) newShowCode[ki - 1] = v;
+    }
     collapsed = newCollapsed;
+    showCode = newShowCode;
     onchange(next);
   }
 
@@ -127,15 +146,89 @@
 {:else if fieldDef.type === 'reference'}
   {@const options = referenceOptions[fieldDef.referenceCollection] ?? referenceOptions[fieldDef.name] ?? []}
   {#if options.length > 0}
-    <select
-      id={fieldId}
-      value={value ?? ''}
-      onchange={(e) => onchange(e.target.value)}
-      class="mimsy-select"
-    >
-      {#if !fieldDef.required}<option value="">None</option>{/if}
-      {#each options as opt}<option value={opt.slug}>{opt.label}</option>{/each}
-    </select>
+    {@const selectedLabel = options.find(o => o.slug === value)?.label ?? (value || '')}
+    {@const filtered = refQuery ? options.filter(o =>
+      o.label.toLowerCase().includes(refQuery.toLowerCase()) ||
+      o.slug.toLowerCase().includes(refQuery.toLowerCase())
+    ) : options}
+    <div style="position:relative;">
+      <!-- Trigger button -->
+      <button
+        type="button"
+        id={fieldId}
+        onclick={() => { refOpen = !refOpen; if (refOpen) refQuery = ''; }}
+        class="mimsy-input flex items-center justify-between w-full text-left"
+        style="cursor:pointer;gap:0.5rem;"
+        aria-haspopup="listbox"
+        aria-expanded={refOpen}
+      >
+        <span class="truncate text-sm {value ? 'text-stone-800' : 'text-stone-400'}">{selectedLabel || 'Select…'}</span>
+        <svg class="w-4 h-4 text-stone-400 shrink-0 transition-transform duration-150" style:transform={refOpen ? 'rotate(180deg)' : ''} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m19 9-7 7-7-7"/></svg>
+      </button>
+      {#if refOpen}
+        <!-- Backdrop to close on outside click -->
+        <div style="position:fixed;inset:0;z-index:49;" onclick={() => { refOpen = false; refQuery = ''; }} role="presentation" aria-hidden="true"></div>
+        <!-- Dropdown panel -->
+        <div style="position:absolute;top:calc(100% + 4px);left:0;right:0;z-index:50;background:#fff;border:1px solid #e7e5e4;border-radius:0.5rem;box-shadow:0 4px 16px rgba(0,0,0,0.1);overflow:hidden;" role="listbox">
+          <!-- Search (only for larger lists) -->
+          {#if options.length > 6}
+            <div style="padding:0.375rem;border-bottom:1px solid #f5f5f4;">
+              <input
+                use:focusEl
+                type="text"
+                placeholder="Search…"
+                bind:value={refQuery}
+                class="mimsy-input"
+                style="padding:0.3125rem 0.625rem;font-size:0.8125rem;"
+              />
+            </div>
+          {/if}
+          <!-- Options -->
+          <div style="max-height:11rem;overflow-y:auto;padding:0.25rem;">
+            {#if !fieldDef.required}
+              <button
+                type="button"
+                onclick={() => { onchange(''); refOpen = false; refQuery = ''; }}
+                class="w-full text-left px-3 py-1.5 text-sm text-stone-400 hover:bg-stone-50 rounded"
+                style="border:none;background:none;cursor:pointer;"
+              >None</button>
+            {/if}
+            {#each filtered as opt}
+              <button
+                type="button"
+                onclick={() => { onchange(opt.slug); refOpen = false; refQuery = ''; }}
+                class="w-full text-left px-3 py-1.5 rounded flex items-center justify-between gap-2 {opt.slug === value ? 'bg-violet-50 text-violet-700 font-medium' : 'text-stone-700 hover:bg-stone-50'}"
+                style="border:none;background:none;cursor:pointer;"
+                role="option"
+                aria-selected={opt.slug === value}
+              >
+                <span class="text-sm truncate">{opt.label}</span>
+                <span style="font-family:monospace;font-size:10px;color:#a8a29e;flex-shrink:0;">{opt.slug}</span>
+              </button>
+            {/each}
+            {#if filtered.length === 0}
+              <p class="text-xs text-stone-400 text-center py-3">No matches</p>
+            {/if}
+          </div>
+          <!-- Create new link -->
+          {#if basePath && fieldDef.referenceCollection && fieldDef.referenceCollection !== '__unknown__'}
+            <div style="border-top:1px solid #f5f5f4;padding:0.3125rem 0.5rem;">
+              <a
+                href="{basePath}/{fieldDef.referenceCollection}/new"
+                target="_blank"
+                rel="noopener noreferrer"
+                onclick={() => { refOpen = false; }}
+                class="flex items-center gap-1.5 text-xs text-violet-600 hover:text-violet-800 font-medium px-2 py-1 rounded hover:bg-violet-50"
+                style="text-decoration:none;"
+              >
+                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+                Create new {fieldDef.referenceCollection}
+              </a>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
   {:else}
     <input type="text" id={fieldId} value={value ?? ''} oninput={(e) => onchange(e.target.value)} class="mimsy-input" placeholder="Reference slug" />
   {/if}
@@ -346,6 +439,67 @@
     </button>
   </div>
 
+<!-- Array: Multi-select reference (z.array(reference('x'))) -->
+{:else if fieldDef.type === 'array' && fieldDef.arrayItemType?.type === 'reference'}
+  {@const arrRef = fieldDef.arrayItemType.referenceCollection ?? ''}
+  {@const options = referenceOptions[arrRef] ?? []}
+  {@const selected = Array.isArray(value) ? value : []}
+  {@const filtered = options.filter(o =>
+    !selected.includes(o.slug) &&
+    (!refQuery || o.label.toLowerCase().includes(refQuery.toLowerCase()) || o.slug.toLowerCase().includes(refQuery.toLowerCase()))
+  )}
+  <div>
+    <!-- Selected chips -->
+    {#if selected.length > 0}
+      <div class="flex flex-wrap gap-1.5 mb-2">
+        {#each selected as selSlug}
+          {@const label = options.find(o => o.slug === selSlug)?.label ?? selSlug}
+          <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-violet-50 border border-violet-200 text-xs text-violet-700 font-medium">
+            {label}
+            <button type="button" onclick={() => onchange(selected.filter(s => s !== selSlug))} style="border:none;background:none;cursor:pointer;padding:0;line-height:1;display:flex;align-items:center;" title="Remove">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+            </button>
+          </span>
+        {/each}
+      </div>
+    {/if}
+    <!-- Add dropdown -->
+    <div style="position:relative;display:inline-block;">
+      <button type="button" onclick={() => { refOpen = !refOpen; if (refOpen) refQuery = ''; }} class="mimsy-btn-secondary text-xs" style="cursor:pointer;">
+        + Add {arrRef || 'item'}
+      </button>
+      {#if refOpen}
+        <div style="position:fixed;inset:0;z-index:49;" onclick={() => { refOpen = false; refQuery = ''; }} role="presentation" aria-hidden="true"></div>
+        <div style="position:absolute;top:calc(100% + 4px);left:0;min-width:200px;z-index:50;background:#fff;border:1px solid #e7e5e4;border-radius:0.5rem;box-shadow:0 4px 16px rgba(0,0,0,0.1);overflow:hidden;" role="listbox">
+          {#if options.length > 6}
+            <div style="padding:0.375rem;border-bottom:1px solid #f5f5f4;">
+              <input use:focusEl type="text" placeholder="Search…" bind:value={refQuery} class="mimsy-input" style="padding:0.3125rem 0.625rem;font-size:0.8125rem;" />
+            </div>
+          {/if}
+          <div style="max-height:11rem;overflow-y:auto;padding:0.25rem;">
+            {#each filtered as opt}
+              <button type="button" onclick={() => { onchange([...selected, opt.slug]); refOpen = false; refQuery = ''; }} class="w-full text-left px-3 py-1.5 rounded flex items-center justify-between gap-2 text-stone-700 hover:bg-stone-50" style="border:none;background:none;cursor:pointer;" role="option" aria-selected="false">
+                <span class="text-sm truncate">{opt.label}</span>
+                <span style="font-family:monospace;font-size:10px;color:#a8a29e;flex-shrink:0;">{opt.slug}</span>
+              </button>
+            {/each}
+            {#if filtered.length === 0}
+              <p class="text-xs text-stone-400 text-center py-3">{selected.length > 0 && selected.length === options.length ? 'All selected' : 'No matches'}</p>
+            {/if}
+          </div>
+          {#if basePath && arrRef && arrRef !== '__unknown__'}
+            <div style="border-top:1px solid #f5f5f4;padding:0.3125rem 0.5rem;">
+              <a href="{basePath}/{arrRef}/new" target="_blank" rel="noopener noreferrer" onclick={() => { refOpen = false; }} class="flex items-center gap-1.5 text-xs text-violet-600 hover:text-violet-800 font-medium px-2 py-1 rounded hover:bg-violet-50" style="text-decoration:none;">
+                <svg class="w-3 h-3 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+                Create new {arrRef}
+              </a>
+            </div>
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </div>
+
 <!-- Array: Scalar (comma-separated) -->
 {:else if fieldDef.type === 'array'}
   <input
@@ -373,9 +527,41 @@
     type="number"
     id={fieldId}
     value={value ?? ''}
-    oninput={(e) => onchange(Number(e.target.value))}
+    oninput={(e) => onchange(e.target.value === '' ? undefined : Number(e.target.value))}
     class="mimsy-input"
   />
+
+<!-- Image field (Astro image() helper) -->
+{:else if fieldDef.type === 'image'}
+  <div>
+    <div class="flex gap-2">
+      <input
+        type="text"
+        id={fieldId}
+        value={value ?? ''}
+        oninput={(e) => onchange(e.target.value)}
+        class="mimsy-input flex-1"
+        placeholder="/src/assets/image.jpg or https://…"
+      />
+      <button
+        type="button"
+        onclick={() => {
+          window.dispatchEvent(new CustomEvent('mimsy:media:open', {
+            detail: {
+              callback: (url) => onchange(url)
+            }
+          }));
+        }}
+        class="mimsy-btn-secondary px-2.5"
+        title="Choose from library"
+      >
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+      </button>
+    </div>
+    {#if value}
+      <img src={value} class="mt-2 max-h-24 rounded object-cover" alt="" />
+    {/if}
+  </div>
 
 <!-- String (default) -->
 {:else}
@@ -386,4 +572,8 @@
     oninput={(e) => onchange(e.target.value)}
     class="mimsy-input"
   />
+{/if}
+
+{#if fieldDef.description}
+  <p class="mt-1.5 text-xs text-stone-400 leading-relaxed">{fieldDef.description}</p>
 {/if}

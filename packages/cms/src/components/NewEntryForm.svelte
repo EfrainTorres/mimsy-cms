@@ -1,9 +1,13 @@
 <script>
+  import { setContext, onDestroy } from 'svelte';
   import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
   import SeoPreview from './SeoPreview.svelte';
   import FieldRenderer from './FieldRenderer.svelte';
   import { formatLabel } from '../utils/format-label.js';
+  import { toast } from '../utils/toast.js';
+
+  onDestroy(() => { if (slugCheckTimer) clearTimeout(slugCheckTimer); });
 
   let {
     collection,
@@ -15,15 +19,14 @@
     templateFrontmatter = {},
   } = $props();
 
+  setContext('mimsyBasePath', basePath);
+
   let title = $state('');
   let slug = $state('');
   let slugManuallyEdited = $state(false);
   let bodyContent = $state(templateBody || '');
   let creating = $state(false);
 
-  function toast(message, type) {
-    window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
-  }
   let slugWarning = $state('');
   let checkingSlug = $state(false);
   let slugCheckTimer = null;
@@ -97,11 +100,20 @@
     slugCheckTimer = setTimeout(checkSlugUniqueness, 500);
   }
 
+  // Whether the schema uses 'name' as the primary identifier instead of 'title'
+  const primaryField = schemaFields.some(f => f.name === 'name') && !schemaFields.some(f => f.name === 'title')
+    ? 'name' : 'title';
+
   function handleTitleInput(e) {
     title = e.target.value;
     if (!slugManuallyEdited) {
-      slug = generateSlug(title);
-      debouncedSlugCheck();
+      const generated = generateSlug(title);
+      slug = generated;
+      if (title.trim() && !generated) {
+        slugWarning = 'empty';
+      } else {
+        debouncedSlugCheck();
+      }
     }
   }
 
@@ -163,7 +175,7 @@
     }
     creating = true;
 
-    const frontmatter = { title: trimmedTitle, draft: true };
+    const frontmatter = { [primaryField]: trimmedTitle, draft: true };
     for (const [key, value] of Object.entries(extraFields)) {
       if (value === '' || value === undefined) continue;
       const def = schemaFields.find(f => f.name === key);
@@ -176,10 +188,11 @@
       const res = await fetch(`/api/mimsy/content/${collection}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slug: trimmedSlug, frontmatter, content: bodyContent }),
+        body: JSON.stringify({ slug: trimmedSlug, frontmatter, content: bodyContent, isJson: isDataCollection }),
       });
       if (res.ok) {
         toast('Entry created', 'success');
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
         navigate(`${basePath}/${collection}/${trimmedSlug}`);
       } else if (res.status === 409) {
         toast('An entry with this slug already exists.', 'error');
@@ -231,16 +244,16 @@
 
   <!-- Title + Slug + Extra fields -->
   <div class="mimsy-card p-5 sm:p-6 mb-5 space-y-4">
-    <!-- Title -->
+    <!-- Title / Name -->
     <div>
-      <label class="mimsy-label" for="field-title">Title</label>
+      <label class="mimsy-label" for="field-title">{primaryField === 'name' ? 'Name' : 'Title'}</label>
       <input
         type="text"
         id="field-title"
         value={title}
         oninput={handleTitleInput}
         class="mimsy-input"
-        placeholder="Enter a title..."
+        placeholder={primaryField === 'name' ? 'Enter a name...' : 'Enter a title...'}
       />
     </div>
 
@@ -260,6 +273,11 @@
         <p class="mt-1.5 text-[11px] text-stone-400 flex items-center gap-1">
           <svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
           Checking...
+        </p>
+      {:else if slugWarning === 'empty'}
+        <p class="mt-1.5 text-[11px] text-amber-600 flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" /></svg>
+          Title produces an empty slug — enter one manually
         </p>
       {:else if slugWarning === 'taken'}
         <p class="mt-1.5 text-[11px] text-red-600 flex items-center gap-1">

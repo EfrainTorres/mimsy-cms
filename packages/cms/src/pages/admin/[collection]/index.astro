@@ -14,6 +14,16 @@ if (!collections.includes(collection)) {
 }
 
 const entries = await adapter.listEntries(collection);
+
+function formatRelative(iso: string | undefined): string {
+  if (!iso) return '';
+  const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 ---
 
 <AdminLayout title={collection} activeCollection={collection}>
@@ -58,6 +68,7 @@ const entries = await adapter.listEntries(collection);
           <tr class="border-b border-stone-100">
             <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Title</th>
             <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Status</th>
+            <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400 hidden md:table-cell">Modified</th>
             <th class="px-5 py-3 text-right text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400 hidden sm:table-cell"><span class="sr-only">Actions</span></th>
           </tr>
         </thead>
@@ -89,6 +100,9 @@ const entries = await adapter.listEntries(collection);
                     <span class="mimsy-status-dot" />
                     {isDraft ? 'Draft' : 'Published'}
                   </span>
+                </td>
+                <td class="px-5 py-3.5 hidden md:table-cell">
+                  <span class="text-xs text-stone-400">{formatRelative(entry.modifiedAt)}</span>
                 </td>
                 <td class="px-5 py-3.5 text-right hidden sm:table-cell">
                   <a

@@ -1,10 +1,14 @@
 <script>
-  import { onDestroy } from 'svelte';
+  import { onDestroy, setContext } from 'svelte';
   import { navigate } from 'astro:transitions/client';
   import TiptapEditor from './TiptapEditor.svelte';
   import SeoPreview from './SeoPreview.svelte';
   import FieldRenderer from './FieldRenderer.svelte';
+  import HistoryDrawer from './HistoryDrawer.svelte';
   import { formatLabel } from '../utils/format-label.js';
+  import { toast } from '../utils/toast.js';
+  import { buildCandidates } from '../overlay/build-candidates.js';
+  import { djb2Hash, setNestedValue, getNestedValue, focusFieldInEditor } from '../overlay/bridge.js';
 
   /**
    * @typedef {Object} SchemaField
@@ -28,9 +32,18 @@
     previewPath = `/${collection}/${slug}`,
   } = $props();
 
+  // Make basePath available to all nested FieldRenderer instances via context
+  setContext('mimsyBasePath', basePath);
+
   // Local mutable copies of initial data
   let frontmatter = $state(JSON.parse(JSON.stringify(initialFrontmatter)));
   let bodyContent = $state(initialBody + '');
+
+  // Version history
+  let historyOpen = $state(false);
+  let historyRevision = $state(0);
+  let restoredFrom = $state(''); // non-empty when content was restored but not yet saved
+  let tiptapKey = $state(0);    // increment to force TiptapEditor remount on restore
 
   // Autosave + save state
   let saveState = $state('clean'); // 'clean' | 'dirty' | 'saving' | 'saved'
@@ -60,10 +73,6 @@
     fetch(previewPath, { method: 'HEAD' })
       .then(r => { previewAvailable = r.ok ? 'yes' : 'no'; })
       .catch(() => { previewAvailable = 'no'; });
-  }
-
-  function toast(message, type) {
-    window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
   }
 
   let pendingDirty = false;
@@ -162,9 +171,16 @@
       if (signal.aborted) return false;
       if (res.ok) {
         saveState = 'saved';
-        if (manual) toast('Changes saved', 'success');
-        const iframe = document.getElementById('mimsy-preview-frame');
-        if (iframe) iframe.src = iframe.src;
+        restoredFrom = '';
+        historyRevision++;
+        if (manual) {
+          toast('Changes saved', 'success');
+          window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        }
+        if (manual && previewOpen) {
+          const iframe = document.getElementById('mimsy-preview-frame');
+          if (iframe) iframe.src = iframe.src;
+        }
         setTimeout(() => { if (saveState === 'saved') saveState = 'clean'; }, 2000);
         if (pendingDirty) scheduleAutosave();
         return true;
@@ -189,6 +205,35 @@
     }
   }
 
+  async function duplicate() {
+    const candidates = [slug + '-copy', ...Array.from({ length: 8 }, (_, i) => `${slug}-copy-${i + 2}`)];
+    for (const newSlug of candidates) {
+      try {
+        const res = await fetch(`/api/mimsy/content/${collection}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ slug: newSlug, frontmatter: JSON.parse(JSON.stringify(frontmatter)), content: bodyContent }),
+        });
+        if (res.ok) {
+          toast('Entry duplicated', 'success');
+          window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+          navigate(`${basePath}/${collection}/${newSlug}`);
+          return;
+        }
+        if (res.status !== 409) {
+          const data = await res.json().catch(() => ({}));
+          toast(data.error || 'Failed to duplicate', 'error');
+          return;
+        }
+        // 409 — slug taken, try next candidate
+      } catch {
+        toast('Network error', 'error');
+        return;
+      }
+    }
+    toast('Could not find a free slug. Rename the entry first.', 'error');
+  }
+
   async function del() {
     if (!confirm(`Delete "${slug}"? This cannot be undone.`)) return;
     try {
@@ -197,6 +242,7 @@
       });
       if (res.ok) {
         toast('Entry deleted', 'success');
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
         navigate(`${basePath}/${collection}`);
       } else {
         toast('Failed to delete.', 'error');
@@ -221,6 +267,83 @@
     localStorage.setItem('mimsy-preview', previewOpen ? 'open' : 'closed');
   }
 
+  function handleRestore(fm, body, versionDate) {
+    frontmatter = JSON.parse(JSON.stringify(fm));
+    bodyContent = body;
+    tiptapKey++; // remount TiptapEditor with restored content
+    saveState = 'dirty';
+    const d = new Date(versionDate);
+    restoredFrom = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  }
+
+  // Visual editing overlay
+  let visualEditEnabled = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-visual-edit') !== 'off'
+  );
+
+  function toggleVisualEdit() {
+    visualEditEnabled = !visualEditEnabled;
+    localStorage.setItem('mimsy-visual-edit', visualEditEnabled ? 'on' : 'off');
+  }
+
+  function sendInitToOverlay() {
+    const iframe = document.getElementById('mimsy-preview-frame');
+    if (!iframe?.contentWindow) return;
+    const candidates = buildCandidates(JSON.parse(JSON.stringify(frontmatter)), schemaFields);
+    iframe.contentWindow.postMessage({
+      type: 'mimsy:init',
+      candidates,
+      contentHash: djb2Hash(JSON.stringify(frontmatter)),
+      mode: 'collection',
+    }, location.origin);
+  }
+
+  function handleOverlayMessage(e) {
+    const iframe = document.getElementById('mimsy-preview-frame');
+    if (!iframe || e.source !== iframe.contentWindow || e.origin !== location.origin) return;
+    const d = e.data;
+    if (!d || !d.type) return;
+
+    if (d.type === 'mimsy:ready') {
+      sendInitToOverlay();
+    }
+    if (d.type === 'mimsy:focus') {
+      previewOpen = false;
+      requestAnimationFrame(() => focusFieldInEditor(d.fieldPath));
+    }
+    if (d.type === 'mimsy:edit') {
+      setNestedValue(frontmatter, d.fieldPath, d.value);
+      frontmatter = { ...frontmatter };
+      scheduleAutosave();
+    }
+    if (d.type === 'mimsy:reorder') {
+      const from = d.from;
+      const to = d.to;
+      const arr = typeof d.arrayPath === 'string' ? getNestedValue(frontmatter, d.arrayPath) : null;
+      if (
+        Array.isArray(arr) &&
+        Number.isInteger(from) && from >= 0 && from < arr.length &&
+        Number.isInteger(to) && to >= 0 && to < arr.length &&
+        from !== to
+      ) {
+        const [item] = arr.splice(from, 1);
+        arr.splice(to, 0, item);
+        frontmatter = { ...frontmatter };
+        scheduleAutosave();
+      }
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('message', handleOverlayMessage);
+  }
+
+  onDestroy(() => {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('message', handleOverlayMessage);
+    }
+  });
+
   function handleKeydown(e) {
     // Cmd/Ctrl+S → manual save (with toast)
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
@@ -242,6 +365,15 @@
 </script>
 
 <svelte:window onkeydown={handleKeydown} />
+
+<HistoryDrawer
+  {collection}
+  {slug}
+  {isDataCollection}
+  revision={historyRevision}
+  bind:open={historyOpen}
+  onrestore={handleRestore}
+/>
 
 <!-- Reusable fields card snippet (used in both two-column and single-column layouts) -->
 {#snippet fieldsCard()}
@@ -302,6 +434,21 @@
 {/snippet}
 
 <div>
+  <!-- Restore banner -->
+  {#if restoredFrom}
+    <div class="mimsy-restore-banner">
+      <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
+      </svg>
+      <span>Loaded from {restoredFrom} — not saved yet.</span>
+      <button onclick={() => restoredFrom = ''} class="ml-auto flex-shrink-0 hover:text-amber-900 transition-colors" title="Dismiss">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+  {/if}
+
   <!-- Header -->
   <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
     <div class="flex items-center gap-3 min-w-0">
@@ -335,11 +482,22 @@
       <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary" class:ring-2={showRaw} class:ring-violet-400={showRaw} title={showRaw ? 'Show form' : 'View raw data'}>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
       </button>
+      <button onclick={() => { historyOpen = !historyOpen; }} class="mimsy-btn-secondary" class:ring-2={historyOpen} class:ring-violet-400={historyOpen} title="Version history">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+      </button>
       {#if !isDataCollection}
+        {#if previewOpen}
+          <button onclick={toggleVisualEdit} class="mimsy-btn-secondary" class:ring-2={visualEditEnabled} class:ring-blue-400={visualEditEnabled} title={visualEditEnabled ? 'Disable visual editing' : 'Enable visual editing'}>
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.042 21.672 13.684 16.6m0 0-2.51 2.225.569-9.47 5.227 7.917-3.286-.672Zm-7.518-.267A8.25 8.25 0 1 1 20.25 10.5M8.288 14.212A5.25 5.25 0 1 1 17.25 10.5" /></svg>
+          </button>
+        {/if}
         <button onclick={togglePreview} class="mimsy-btn-secondary" title={previewOpen ? 'Close preview' : 'Open preview'}>
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
         </button>
       {/if}
+      <button onclick={duplicate} class="mimsy-btn-secondary" title="Duplicate entry">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.688a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
+      </button>
       <button onclick={() => save(true)} disabled={saveState === 'saving'} class="mimsy-btn-primary">
         {saveState === 'saving' ? 'Saving...' : 'Save'}
       </button>
@@ -384,10 +542,12 @@
         <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1 space-y-5">
           <div class="mimsy-card p-5">
             <p class="mimsy-section-title">Content</p>
-            <TiptapEditor
-              content={initialBody}
-              onchange={(md) => { bodyContent = md; scheduleAutosave(); }}
-            />
+            {#key tiptapKey}
+              <TiptapEditor
+                content={bodyContent}
+                onchange={(md) => { bodyContent = md; scheduleAutosave(); }}
+              />
+            {/key}
           </div>
           {@render blockCards()}
         </div>
@@ -410,7 +570,7 @@
               </div>
             </div>
           {:else}
-            <iframe id="mimsy-preview-frame" src={previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
+            <iframe id="mimsy-preview-frame" src={visualEditEnabled ? `${previewPath}?__mimsy=1` : previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
           {/if}
         {/if}
       </div>

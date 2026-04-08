@@ -11,11 +11,11 @@ if (!collection) return Astro.redirect(config.basePath);
 
 const adapter = await createAdapter(Astro.request, Astro.locals);
 
-// Determine if this is a data (JSON) collection by checking existing entries
-const entries = await adapter.listEntries(collection);
-const isDataCollection = entries.length > 0
-  ? entries[0].body === '' && entries[0].rawContent.trim().startsWith('{')
-  : false;
+// Guard: ensure the collection actually exists
+const validCollections = await adapter.listCollections();
+if (!validCollections.includes(collection)) {
+  return Astro.redirect(config.basePath);
+}
 
 // Get schema fields for this collection (if available)
 const schemaFields = schemas[collection] ?? [];
@@ -26,6 +26,11 @@ function collectReferenceCollections(fields: typeof schemaFields): Set<string> {
   for (const f of fields) {
     if (f.type === 'reference' && f.referenceCollection && f.referenceCollection !== '__unknown__') {
       refs.add(f.referenceCollection);
+    }
+    // z.array(reference('x')) — many-to-many
+    if (f.type === 'array' && f.arrayItemType?.type === 'reference' &&
+        f.arrayItemType.referenceCollection && f.arrayItemType.referenceCollection !== '__unknown__') {
+      refs.add(f.arrayItemType.referenceCollection);
     }
     if (f.objectFields) {
       for (const r of collectReferenceCollections(f.objectFields)) refs.add(r);
@@ -42,24 +47,41 @@ function collectReferenceCollections(fields: typeof schemaFields): Set<string> {
   return refs;
 }
 
-const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
-for (const refCollection of collectReferenceCollections(schemaFields)) {
-  try {
-    const refEntries = await adapter.listEntries(refCollection);
-    referenceOptions[refCollection] = refEntries.map((e) => ({
-      slug: e.slug,
-      label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
-    }));
-  } catch {
-    referenceOptions[refCollection] = [];
-  }
-}
+const refCollections = [...collectReferenceCollections(schemaFields)];
+const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = Object.fromEntries(
+  await Promise.all(
+    refCollections.map(async (refCollection) => {
+      try {
+        const refEntries = await adapter.listEntries(refCollection);
+        return [refCollection, refEntries.map((e) => ({
+          slug: e.slug,
+          label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
+        }))] as const;
+      } catch {
+        return [refCollection, []] as const;
+      }
+    })
+  )
+);
+
+// Load entries and templates in parallel
+const [entries, mdTemplate, jsonTemplate] = await Promise.all([
+  adapter.listEntries(collection),
+  adapter.getFileContent(`_templates/${collection}.md`),
+  adapter.getFileContent(`_templates/${collection}.json`),
+]);
+
+// Determine if this is a data (JSON) collection.
+// When entries exist, check the first one. For empty collections, fall back
+// to whether a JSON template is present as a format hint.
+const isDataCollection = entries.length > 0
+  ? entries[0].body === '' && entries[0].rawContent.trim().startsWith('{')
+  : jsonTemplate !== null;
 
 // Load content template via adapter (works for both local and GitHub)
 let templateBody = '';
 let templateFrontmatter: Record<string, unknown> = {};
 
-const mdTemplate = await adapter.getFileContent(`_templates/${collection}.md`);
 if (mdTemplate) {
   try {
     const parsed = matter(mdTemplate);
@@ -68,14 +90,11 @@ if (mdTemplate) {
   } catch {
     // Template parsing failed; continue without template
   }
-} else {
-  const jsonTemplate = await adapter.getFileContent(`_templates/${collection}.json`);
-  if (jsonTemplate) {
-    try {
-      templateFrontmatter = JSON.parse(jsonTemplate);
-    } catch {
-      // Template parsing failed; continue without template
-    }
+} else if (jsonTemplate) {
+  try {
+    templateFrontmatter = JSON.parse(jsonTemplate);
+  } catch {
+    // Template parsing failed; continue without template
   }
 }
 ---

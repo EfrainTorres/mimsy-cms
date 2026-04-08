@@ -1,8 +1,10 @@
 declare module 'virtual:mimsy/config' {
+  import type { MediaConfig } from '@mimsy/cms/src/types.js';
   const config: {
     basePath: string;
     contentDir: string;
     isGitHubMode: boolean;
+    media: MediaConfig | null;
   };
   export default config;
 }

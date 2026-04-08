@@ -1,6 +1,9 @@
 <script>
   import { onDestroy, onMount, tick } from 'svelte';
   import { navigate } from 'astro:transitions/client';
+  import { buildPageCandidates } from '../overlay/build-candidates.js';
+  import { djb2Hash } from '../overlay/bridge.js';
+  import { toast } from '../utils/toast.js';
 
   let {
     pagePath,
@@ -99,6 +102,63 @@
   // Raw code view
   let showRaw = $state(false);
 
+  // Visual editing overlay
+  let visualEditEnabled = $state(
+    typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-visual-edit') !== 'off'
+  );
+
+  function toggleVisualEdit() {
+    visualEditEnabled = !visualEditEnabled;
+    localStorage.setItem('mimsy-visual-edit', visualEditEnabled ? 'on' : 'off');
+  }
+
+  function sendInitToOverlay() {
+    const iframe = document.getElementById('mimsy-preview-frame');
+    if (!iframe?.contentWindow) return;
+    const candidates = buildPageCandidates(JSON.parse(JSON.stringify(fields)));
+    iframe.contentWindow.postMessage({
+      type: 'mimsy:init',
+      candidates,
+      contentHash: djb2Hash(JSON.stringify(fields.map(f => f.value))),
+      mode: 'page',
+    }, location.origin);
+  }
+
+  function handleOverlayMessage(e) {
+    const iframe = document.getElementById('mimsy-preview-frame');
+    if (!iframe || e.source !== iframe.contentWindow || e.origin !== location.origin) return;
+    const d = e.data;
+    if (!d || !d.type) return;
+
+    if (d.type === 'mimsy:ready') {
+      sendInitToOverlay();
+    }
+    if (d.type === 'mimsy:focus') {
+      previewOpen = false;
+      requestAnimationFrame(() => {
+        const idx = fields.findIndex(f => f.id === d.fieldPath);
+        if (idx >= 0) {
+          const el = document.getElementById(`field-${fields[idx].id}`);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            el.focus();
+          }
+        }
+      });
+    }
+    if (d.type === 'mimsy:edit') {
+      const idx = fields.findIndex(f => f.id === d.fieldPath);
+      if (idx >= 0) {
+        fields[idx].value = d.value;
+        scheduleAutosave();
+      }
+    }
+  }
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('message', handleOverlayMessage);
+  }
+
   function copyRaw() {
     const data = {};
     for (const field of fields) data[field.label || field.id] = field.value;
@@ -108,9 +168,6 @@
     );
   }
 
-  function toast(message, type) {
-    window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message, type } }));
-  }
 
   let pendingDirty = false;
 
@@ -125,6 +182,9 @@
     if (autosaveTimer) clearTimeout(autosaveTimer);
     if (saveController) saveController.abort();
     if (observer) observer.disconnect();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('message', handleOverlayMessage);
+    }
   });
 
   function handleFieldInput(index, value) {
@@ -170,9 +230,14 @@
         // Update initialFields to reflect saved state
         initialFields = JSON.parse(JSON.stringify(fields));
         saveState = 'saved';
-        if (manual) toast('Changes saved', 'success');
-        const iframe = document.getElementById('mimsy-preview-frame');
-        if (iframe) iframe.src = iframe.src;
+        if (manual) {
+          toast('Changes saved', 'success');
+          window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        }
+        if (manual && previewOpen) {
+          const iframe = document.getElementById('mimsy-preview-frame');
+          if (iframe) iframe.src = iframe.src;
+        }
         setTimeout(() => { if (saveState === 'saved') saveState = 'clean'; }, 2000);
         if (pendingDirty) scheduleAutosave();
         return true;
@@ -242,6 +307,11 @@
       <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary" class:ring-2={showRaw} class:ring-violet-400={showRaw} title={showRaw ? 'Show form' : 'View raw data'}>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
       </button>
+      {#if previewOpen}
+        <button onclick={toggleVisualEdit} class="mimsy-btn-secondary" class:ring-2={visualEditEnabled} class:ring-blue-400={visualEditEnabled} title={visualEditEnabled ? 'Disable visual editing' : 'Enable visual editing'}>
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.042 21.672 13.684 16.6m0 0-2.51 2.225.569-9.47 5.227 7.917-3.286-.672Zm-7.518-.267A8.25 8.25 0 1 1 20.25 10.5M8.288 14.212A5.25 5.25 0 1 1 17.25 10.5" /></svg>
+        </button>
+      {/if}
       <button onclick={togglePreview} class="mimsy-btn-secondary" title={previewOpen ? 'Close preview' : 'Open preview'}>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
       </button>
@@ -375,7 +445,7 @@
         </button>
       </div>
       {#if previewOpen}
-        <iframe id="mimsy-preview-frame" src={previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
+        <iframe id="mimsy-preview-frame" src={visualEditEnabled ? `${previewPath}?__mimsy=1` : previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
       {/if}
     </div>
   </div>

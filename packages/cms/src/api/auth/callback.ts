@@ -58,10 +58,7 @@ export const GET: APIRoute = async ({ url, cookies }) => {
     if (tokenData.error || !tokenData.access_token) {
       console.error('[mimsy] Token exchange failed:', tokenData.error_description ?? tokenData.error);
       return new Response(
-        JSON.stringify({
-          error: 'Failed to exchange code for token',
-          detail: tokenData.error_description ?? tokenData.error,
-        }),
+        JSON.stringify({ error: 'Failed to exchange code for token' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } },
       );
     }

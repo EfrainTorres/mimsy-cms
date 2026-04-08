@@ -7,7 +7,7 @@ sections:
     items:
       - title: Simple
         description: Zero config
-      - title: Fast
+      - title: Quick
         description: Built for the edge
   - type: hero
     heading: Welcome to MimsyCMS

@@ -24,6 +24,7 @@ plan.md
 .claude/
 .playwright-mcp/
 ScreenShots/
+plan-new.md
 
 # Dev uploads (created during testing)
 playground/src/assets/uploads/

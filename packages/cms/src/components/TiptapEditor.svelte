@@ -5,13 +5,16 @@
   import { Markdown } from '@tiptap/markdown';
   import Link from '@tiptap/extension-link';
   import Image from '@tiptap/extension-image';
+  import { toast } from '../utils/toast.js';
 
   let { content = '', onchange = () => {} } = $props();
 
   let editorElement = $state();
   let editor = $state();
+  let editorVersion = $state(0); // incremented on each transaction to keep toolbar in sync
   let uploading = $state(false);
   let imageFileInput = $state();
+  let showImageMenu = $state(false);
 
   async function uploadImage(file) {
     const formData = new FormData();
@@ -52,7 +55,7 @@
       }
     } catch (err) {
       console.error('Image upload failed:', err);
-      alert(`Image upload failed: ${err.message}`);
+      toast(`Image upload failed: ${err.message}`, 'error');
       const { doc } = editor.state;
       doc.descendants((node, pos) => {
         if (node.isText && node.text?.includes(placeholderText)) {
@@ -104,6 +107,7 @@
           return true;
         },
       },
+      onTransaction: () => { editorVersion++; },
       onUpdate: ({ editor: e }) => { onchange(e.getMarkdown()); },
     });
   });
@@ -131,7 +135,18 @@
   }
   function removeLink() { editor?.chain().focus().unsetLink().run(); }
 
-  function triggerImagePicker() { imageFileInput?.click(); }
+  function triggerImagePicker() { showImageMenu = !showImageMenu; }
+
+  function insertFromLibrary() {
+    showImageMenu = false;
+    window.dispatchEvent(new CustomEvent('mimsy:media:open', {
+      detail: {
+        callback: (url, alt) => {
+          if (editor) editor.chain().focus().setImage({ src: url, alt: alt || '' }).run();
+        }
+      }
+    }));
+  }
   function onImageFileSelected(event) {
     const files = event.target.files;
     if (!files || files.length === 0) return;
@@ -143,8 +158,12 @@
 
   export function getMarkdown() { return editor?.getMarkdown() ?? ''; }
 
-  // Toolbar button helper
-  function isActive(type, opts) { return editor?.isActive(type, opts) ?? false; }
+  // Toolbar button helper — reads editorVersion to declare a reactive dependency,
+  // so Svelte re-evaluates after every Tiptap transaction.
+  function isActive(type, opts) {
+    void editorVersion;
+    return editor?.isActive(type, opts) ?? false;
+  }
 </script>
 
 <div class="mimsy-tiptap">
@@ -227,20 +246,38 @@
       </button>
     {/if}
 
-    <!-- Image -->
-    <button type="button" onclick={triggerImagePicker}
-      class="mimsy-toolbar-btn" disabled={uploading}
-      title="Insert Image">
-      {#if uploading}
-        <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-      {:else}
-        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+    <!-- Image dropdown -->
+    <div class="relative">
+      <button type="button" onclick={triggerImagePicker}
+        class="mimsy-toolbar-btn" class:active={showImageMenu} disabled={uploading}
+        title="Insert Image">
+        {#if uploading}
+          <svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+        {:else}
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+        {/if}
+      </button>
+      {#if showImageMenu}
+        <div class="absolute left-0 top-full mt-1 z-20 bg-white border border-stone-200 rounded-lg shadow-lg py-1 min-w-[140px]">
+          <button type="button" onclick={() => { showImageMenu = false; imageFileInput?.click(); }}
+            class="w-full text-left px-3 py-1.5 text-[12px] text-stone-700 hover:bg-stone-50 flex items-center gap-2"
+            style="border:none;background:none;cursor:pointer;">
+            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+            Upload file
+          </button>
+          <button type="button" onclick={insertFromLibrary}
+            class="w-full text-left px-3 py-1.5 text-[12px] text-stone-700 hover:bg-stone-50 flex items-center gap-2"
+            style="border:none;background:none;cursor:pointer;">
+            <svg class="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+            From library
+          </button>
+        </div>
       {/if}
-    </button>
+    </div>
     <input
       bind:this={imageFileInput}
       type="file"
-      accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+      accept="image/*"
       class="hidden"
       onchange={onImageFileSelected}
     />

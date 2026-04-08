@@ -22,7 +22,7 @@ export function introspectCollections(
  * returns the same mock — prevents throws on `image().optional()`.
  */
 function zodStringMock(): any {
-  const self: any = new Proxy({ _def: { typeName: 'ZodString' } }, {
+  const self: any = new Proxy({ _def: { typeName: 'ZodString', description: '__mimsy_image__' } }, {
     get(target, prop) {
       if (prop === '_def') return target._def;
       if (typeof prop === 'symbol') return undefined;
@@ -64,6 +64,14 @@ function introspectField(name: string, schema: any): SchemaField {
   let defaultValue: unknown = undefined;
   let current = schema;
 
+  // Capture description from the outermost schema first (.describe() can be called
+  // on any wrapper level, e.g. z.string().optional().describe("help"))
+  // Filter out the internal __mimsy_image__ sentinel — it is not user-provided help text.
+  const description: string | undefined =
+    schema?._def?.description && schema._def.description !== '__mimsy_image__'
+      ? schema._def.description
+      : undefined;
+
   // Unwrap layers of ZodOptional, ZodDefault, ZodNullable
   while (current?._def) {
     const typeName = current._def.typeName;
@@ -86,11 +94,19 @@ function introspectField(name: string, schema: any): SchemaField {
     break;
   }
 
+  // Also check the innermost type in case .describe() was called before wrappers
+  // e.g. z.string().describe("help").optional()
+  const innerDescription: string | undefined =
+    current?._def?.description && current._def.description !== '__mimsy_image__'
+      ? current._def.description
+      : undefined;
+
   const baseField = introspectBaseType(current);
   return {
     name,
     required,
     defaultValue,
+    description: description || innerDescription || undefined,
     ...baseField,
   };
 }
@@ -124,6 +140,7 @@ function introspectBaseType(schema: any): Omit<SchemaField, 'name' | 'required' 
 
   switch (typeName) {
     case 'ZodString':
+      if (schema._def.description === '__mimsy_image__') return { type: 'image' };
       return { type: 'string' };
     case 'ZodNumber':
       return { type: 'number' };
@@ -315,6 +332,7 @@ function generateDefaults(fields: SchemaField[]): Record<string, unknown> {
     if (!f.required) continue;
     switch (f.type) {
       case 'string': item[f.name] = ''; break;
+      case 'image': item[f.name] = ''; break;
       case 'number': item[f.name] = 0; break;
       case 'boolean': item[f.name] = false; break;
       case 'date': item[f.name] = new Date().toISOString().split('T')[0]; break;

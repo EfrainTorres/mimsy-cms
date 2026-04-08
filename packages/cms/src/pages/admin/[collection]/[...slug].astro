@@ -28,6 +28,11 @@ function collectReferenceCollections(fields: typeof schemaFields): Set<string> {
     if (f.type === 'reference' && f.referenceCollection && f.referenceCollection !== '__unknown__') {
       refs.add(f.referenceCollection);
     }
+    // z.array(reference('x')) — many-to-many
+    if (f.type === 'array' && f.arrayItemType?.type === 'reference' &&
+        f.arrayItemType.referenceCollection && f.arrayItemType.referenceCollection !== '__unknown__') {
+      refs.add(f.arrayItemType.referenceCollection);
+    }
     if (f.objectFields) {
       for (const r of collectReferenceCollections(f.objectFields)) refs.add(r);
     }
@@ -43,18 +48,22 @@ function collectReferenceCollections(fields: typeof schemaFields): Set<string> {
   return refs;
 }
 
-const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = {};
-for (const refCollection of collectReferenceCollections(schemaFields)) {
-  try {
-    const refEntries = await adapter.listEntries(refCollection);
-    referenceOptions[refCollection] = refEntries.map((e) => ({
-      slug: e.slug,
-      label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
-    }));
-  } catch {
-    referenceOptions[refCollection] = [];
-  }
-}
+const refCollections = [...collectReferenceCollections(schemaFields)];
+const referenceOptions: Record<string, Array<{ slug: string; label: string }>> = Object.fromEntries(
+  await Promise.all(
+    refCollections.map(async (refCollection) => {
+      try {
+        const refEntries = await adapter.listEntries(refCollection);
+        return [refCollection, refEntries.map((e) => ({
+          slug: e.slug,
+          label: (e.frontmatter.title || e.frontmatter.name || e.slug) as string,
+        }))] as const;
+      } catch {
+        return [refCollection, []] as const;
+      }
+    })
+  )
+);
 ---
 
 <AdminLayout title={`Edit: ${entry.slug}`} activeCollection={collection}>

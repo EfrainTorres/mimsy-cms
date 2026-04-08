@@ -4,10 +4,13 @@ import { ConflictError } from '../../../types.js';
 import validators from 'virtual:mimsy/validators';
 import { validateFrontmatter } from '../../../schema-validation.js';
 
+// Collection names must be simple identifiers — no path separators or traversal sequences.
+const VALID_COLLECTION = /^[a-zA-Z0-9_-]+$/;
+
 /** GET /api/mimsy/content/[collection]/[slug] — get single entry with body */
 export const GET: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
-  if (!collection || !slug) {
+  if (!collection || !slug || !VALID_COLLECTION.test(collection)) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
@@ -26,7 +29,7 @@ export const GET: APIRoute = async ({ params, request, locals }) => {
 /** PUT /api/mimsy/content/[collection]/[slug] — update entry */
 export const PUT: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
-  if (!collection || !slug) {
+  if (!collection || !slug || !VALID_COLLECTION.test(collection)) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
@@ -55,9 +58,12 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
 
   try {
     await adapter.updateEntry(collection, slug, frontmatter, content ?? '');
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof ConflictError) {
       return new Response(JSON.stringify({ error: err.message }), { status: 409 });
+    }
+    if (err?.status === 400) {
+      return new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400 });
     }
     throw err;
   }
@@ -70,7 +76,7 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
 /** DELETE /api/mimsy/content/[collection]/[slug] — delete entry */
 export const DELETE: APIRoute = async ({ params, request, locals }) => {
   const { collection, slug } = params;
-  if (!collection || !slug) {
+  if (!collection || !slug || !VALID_COLLECTION.test(collection)) {
     return new Response(JSON.stringify({ error: 'Missing params' }), { status: 400 });
   }
 
@@ -78,9 +84,12 @@ export const DELETE: APIRoute = async ({ params, request, locals }) => {
 
   try {
     await adapter.deleteEntry(collection, slug);
-  } catch (err) {
+  } catch (err: any) {
     if (err instanceof ConflictError) {
       return new Response(JSON.stringify({ error: err.message }), { status: 409 });
+    }
+    if (err?.status === 400) {
+      return new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400 });
     }
     throw err;
   }

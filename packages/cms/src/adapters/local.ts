@@ -1,11 +1,24 @@
-import { readdir, readFile, writeFile, unlink, mkdir } from 'node:fs/promises';
-import { join, dirname, parse as parsePath, extname } from 'node:path';
+import { readdir, readFile, writeFile, unlink, mkdir, stat } from 'node:fs/promises';
+import { join, dirname, parse as parsePath, extname, resolve, sep } from 'node:path';
 import { existsSync } from 'node:fs';
 import matter from 'gray-matter';
 import type { ContentAdapter, ContentEntry } from '../types.js';
 
 export class LocalContentAdapter implements ContentAdapter {
   constructor(private contentDir: string) {}
+
+  /** Resolve path within base. Returns null if the result would escape base. */
+  private safe(base: string, ...parts: string[]): string | null {
+    const resolved = resolve(base, ...parts);
+    return resolved.startsWith(resolve(base) + sep) ? resolved : null;
+  }
+
+  /** Like safe() but throws a tagged 400 error on traversal — for write operations. */
+  private confined(base: string, ...parts: string[]): string {
+    const resolved = this.safe(base, ...parts);
+    if (!resolved) throw Object.assign(new Error('Invalid path'), { status: 400 });
+    return resolved;
+  }
 
   async listCollections(): Promise<string[]> {
     if (!existsSync(this.contentDir)) return [];
@@ -17,8 +30,8 @@ export class LocalContentAdapter implements ContentAdapter {
   }
 
   async listEntries(collection: string): Promise<ContentEntry[]> {
-    const dir = join(this.contentDir, collection);
-    if (!existsSync(dir)) return [];
+    const dir = this.safe(this.contentDir, collection);
+    if (!dir || !existsSync(dir)) return [];
 
     const files = await readdir(dir);
     const entries: ContentEntry[] = [];
@@ -28,15 +41,20 @@ export class LocalContentAdapter implements ContentAdapter {
       if (ext !== '.md' && ext !== '.mdx' && ext !== '.json') continue;
 
       const slug = parsePath(file).name;
-      const filePath = join(dir, file);
-      const rawContent = await readFile(filePath, 'utf-8');
+      const filePath = join(dir, file); // file comes from readdir, not user input
+      const [rawContent, fileStat] = await Promise.all([
+        readFile(filePath, 'utf-8'),
+        stat(filePath),
+      ]);
+      const modifiedAt = fileStat.mtime.toISOString();
 
       if (ext === '.json') {
-        const data = JSON.parse(rawContent);
-        entries.push({ slug, collection, frontmatter: data, body: '', rawContent });
+        let data: Record<string, unknown>;
+        try { data = JSON.parse(rawContent); } catch (e) { console.warn(`[mimsy] Failed to parse ${filePath}:`, e); continue; }
+        entries.push({ slug, collection, frontmatter: data, body: '', rawContent, modifiedAt });
       } else {
         const { data: frontmatter, content: body } = matter(rawContent);
-        entries.push({ slug, collection, frontmatter, body: body.trim(), rawContent });
+        entries.push({ slug, collection, frontmatter, body: body.trim(), rawContent, modifiedAt });
       }
     }
 
@@ -44,11 +62,12 @@ export class LocalContentAdapter implements ContentAdapter {
   }
 
   async getEntry(collection: string, slug: string): Promise<ContentEntry | null> {
-    const dir = join(this.contentDir, collection);
+    const dir = this.safe(this.contentDir, collection);
+    if (!dir) return null;
 
     for (const ext of ['.md', '.mdx', '.json']) {
-      const filePath = join(dir, `${slug}${ext}`);
-      if (!existsSync(filePath)) continue;
+      const filePath = this.safe(dir, `${slug}${ext}`);
+      if (!filePath || !existsSync(filePath)) continue;
 
       const rawContent = await readFile(filePath, 'utf-8');
 
@@ -68,21 +87,21 @@ export class LocalContentAdapter implements ContentAdapter {
     collection: string,
     slug: string,
     frontmatter: Record<string, unknown>,
-    body: string
+    body: string,
+    format?: 'json' | 'markdown'
   ): Promise<void> {
-    const dir = join(this.contentDir, collection);
+    const dir = this.confined(this.contentDir, collection);
     if (!existsSync(dir)) {
       await mkdir(dir, { recursive: true });
     }
 
-    // Detect collection type from existing files
-    const isJson = await this.isJsonCollection(collection);
+    const isJson = format === 'json' || (format !== 'markdown' && await this.isJsonCollection(collection));
 
     if (isJson) {
-      const filePath = join(dir, `${slug}.json`);
+      const filePath = this.confined(dir, `${slug}.json`);
       await writeFile(filePath, JSON.stringify(frontmatter, null, 2) + '\n', 'utf-8');
     } else {
-      const filePath = join(dir, `${slug}.md`);
+      const filePath = this.confined(dir, `${slug}.md`);
       const content = matter.stringify('\n' + body, frontmatter);
       await writeFile(filePath, content, 'utf-8');
     }
@@ -94,18 +113,16 @@ export class LocalContentAdapter implements ContentAdapter {
     frontmatter: Record<string, unknown>,
     body: string
   ): Promise<void> {
-    const dir = join(this.contentDir, collection);
+    const dir = this.confined(this.contentDir, collection);
 
-    // Check if existing file is JSON
-    const jsonPath = join(dir, `${slug}.json`);
+    const jsonPath = this.confined(dir, `${slug}.json`);
     if (existsSync(jsonPath)) {
       await writeFile(jsonPath, JSON.stringify(frontmatter, null, 2) + '\n', 'utf-8');
       return;
     }
 
-    // Otherwise write as markdown
     for (const ext of ['.md', '.mdx']) {
-      const filePath = join(dir, `${slug}${ext}`);
+      const filePath = this.confined(dir, `${slug}${ext}`);
       if (existsSync(filePath)) {
         const content = matter.stringify('\n' + body, frontmatter);
         await writeFile(filePath, content, 'utf-8');
@@ -118,9 +135,9 @@ export class LocalContentAdapter implements ContentAdapter {
   }
 
   async deleteEntry(collection: string, slug: string): Promise<void> {
-    const dir = join(this.contentDir, collection);
+    const dir = this.confined(this.contentDir, collection);
     for (const ext of ['.md', '.mdx', '.json']) {
-      const filePath = join(dir, `${slug}${ext}`);
+      const filePath = this.confined(dir, `${slug}${ext}`);
       if (existsSync(filePath)) {
         await unlink(filePath);
         return;
@@ -133,34 +150,33 @@ export class LocalContentAdapter implements ContentAdapter {
     const projectRoot = dirname(dirname(this.contentDir));
     const uploadDir = join(projectRoot, 'src', 'assets', 'uploads');
     await mkdir(uploadDir, { recursive: true });
-
-    const dest = join(uploadDir, filename);
+    const dest = this.confined(uploadDir, filename);
     await writeFile(dest, content);
     return `/src/assets/uploads/${filename}`;
   }
 
   async getFileContent(path: string): Promise<string | null> {
-    const fullPath = path.startsWith('/') ? path : join(this.contentDir, path);
-    if (!existsSync(fullPath)) return null;
+    const fullPath = this.safe(this.contentDir, path);
+    if (!fullPath || !existsSync(fullPath)) return null;
     return readFile(fullPath, 'utf-8');
   }
 
   async getProjectFile(path: string): Promise<string | null> {
     const projectRoot = dirname(dirname(this.contentDir));
-    const fullPath = join(projectRoot, path);
-    if (!existsSync(fullPath)) return null;
+    const fullPath = this.safe(projectRoot, path);
+    if (!fullPath || !existsSync(fullPath)) return null;
     return readFile(fullPath, 'utf-8');
   }
 
   async writeProjectFile(path: string, content: string): Promise<void> {
     const projectRoot = dirname(dirname(this.contentDir));
-    const fullPath = join(projectRoot, path);
+    const fullPath = this.confined(projectRoot, path);
     await writeFile(fullPath, content, 'utf-8');
   }
 
   private async isJsonCollection(collection: string): Promise<boolean> {
-    const dir = join(this.contentDir, collection);
-    if (!existsSync(dir)) return false;
+    const dir = this.safe(this.contentDir, collection);
+    if (!dir || !existsSync(dir)) return false;
     const files = await readdir(dir);
     return files.some((f) => f.endsWith('.json'));
   }

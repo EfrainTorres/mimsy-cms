@@ -24,17 +24,23 @@ export function vitePluginMimsy(
   const configModule = `export default {
   basePath: ${JSON.stringify(mimsyConfig.basePath)},
   contentDir: ${JSON.stringify(contentDir)},
+  media: ${JSON.stringify(mimsyConfig.media ?? null)},
   get isGitHubMode() { return !!import.meta.env.MIMSY_GITHUB_REPO; },
 };`;
 
   // virtual:mimsy/schemas generates code that imports the user's content config
-  // and runs schema introspection at build/dev time
+  // and runs schema introspection at build/dev time.
+  // Tries multiple extensions to match validatorsModule behavior.
   const schemasModule = `
 import { introspectCollections } from '@mimsy/cms/src/schema-introspection.js';
 let schemas = {};
 try {
-  const mod = await import('/src/content.config.ts');
-  if (mod.collections) {
+  let mod = null;
+  try { mod = await import('/src/content.config.ts'); } catch {}
+  if (!mod) try { mod = await import('/src/content.config.mts'); } catch {}
+  if (!mod) try { mod = await import('/src/content.config.js'); } catch {}
+  if (!mod) try { mod = await import('/src/content.config.mjs'); } catch {}
+  if (mod?.collections) {
     schemas = introspectCollections(mod.collections);
   }
 } catch (e) {

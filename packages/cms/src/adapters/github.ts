@@ -64,16 +64,10 @@ export class GitHubContentAdapter implements ContentAdapter {
     const dirPath = `${this.contentPath}/${collection}`;
 
     try {
-      const { data } = await this.octokit.rest.repos.getContent({
-        owner: this.owner,
-        repo: this.repo,
-        ref: this.branch,
-        path: dirPath,
-      });
+      // Use cached directory listing (avoids redundant API call if dir was recently fetched)
+      const dirFiles = await this.listDirFiles(collection);
 
-      if (!Array.isArray(data)) return [];
-
-      const contentFiles = data.filter((entry) => {
+      const contentFiles = dirFiles.filter((entry) => {
         if (entry.type !== 'file') return false;
         const name = entry.name;
         return name.endsWith('.md') || name.endsWith('.mdx') || name.endsWith('.json');
@@ -88,7 +82,8 @@ export class GitHubContentAdapter implements ContentAdapter {
           const slug = basename(file.name, ext);
 
           if (ext === '.json') {
-            const frontmatter = JSON.parse(rawContent);
+            let frontmatter: Record<string, unknown>;
+            try { frontmatter = JSON.parse(rawContent); } catch { return null; }
             return { slug, collection, frontmatter, body: '', rawContent } as ContentEntry;
           }
 
@@ -125,9 +120,10 @@ export class GitHubContentAdapter implements ContentAdapter {
     collection: string,
     slug: string,
     frontmatter: Record<string, unknown>,
-    body: string
+    body: string,
+    format?: 'json' | 'markdown'
   ): Promise<void> {
-    const isJson = await this.isJsonCollection(collection);
+    const isJson = format === 'json' || (format !== 'markdown' && await this.isJsonCollection(collection));
 
     if (isJson) {
       const filePath = `${this.contentPath}/${collection}/${slug}.json`;

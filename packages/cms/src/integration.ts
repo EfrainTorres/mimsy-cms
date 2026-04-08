@@ -8,6 +8,7 @@ function resolveConfig(userConfig: MimsyConfig): ResolvedMimsyConfig {
   return {
     basePath: userConfig.basePath ?? '/admin',
     contentDir: userConfig.contentDir,
+    media: userConfig.media,
   };
 }
 
@@ -63,6 +64,20 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
           logger.info('GitHub mode enabled');
         }
 
+        // Auto-configure image.domains for R2 public URLs
+        if (config.media?.storage === 'r2' && config.media?.publicUrl) {
+          try {
+            const hostname = new URL(config.media.publicUrl).hostname;
+            const existing: string[] = (astroConfig.image as any)?.domains ?? [];
+            if (!existing.includes(hostname)) {
+              updateConfig({ image: { domains: [...existing, hostname] } });
+              logger.info('[mimsy] Added ' + hostname + ' to image.domains for R2');
+            }
+          } catch {
+            logger.warn('[mimsy] media.publicUrl is not a valid URL — image.domains not configured.');
+          }
+        }
+
         // Inject admin pages
         injectRoute({ pattern: base, entrypoint: '@mimsy/cms/src/pages/admin/index.astro', prerender: false });
         injectRoute({ pattern: `${base}/_page/[...path]`, entrypoint: '@mimsy/cms/src/pages/admin/_page/[...path].astro', prerender: false });
@@ -76,6 +91,11 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
         injectRoute({ pattern: '/api/mimsy/content/[collection]/[...slug]', entrypoint: '@mimsy/cms/src/api/content/[collection]/[...slug].ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/upload', entrypoint: '@mimsy/cms/src/api/upload.ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/page-text/[...path]', entrypoint: '@mimsy/cms/src/api/page-text/[...path].ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/history', entrypoint: '@mimsy/cms/src/api/history.ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/history/diff', entrypoint: '@mimsy/cms/src/api/history-diff.ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/media', entrypoint: '@mimsy/cms/src/api/media/index.ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/deploy', entrypoint: '@mimsy/cms/src/api/deploy.ts', prerender: false });
+        injectRoute({ pattern: base + '/media', entrypoint: '@mimsy/cms/src/pages/admin/media.astro', prerender: false });
 
         // Inject auth API routes
         injectRoute({ pattern: '/api/mimsy/auth/login', entrypoint: '@mimsy/cms/src/api/auth/login.ts', prerender: false });

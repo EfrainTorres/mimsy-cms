@@ -58,10 +58,14 @@ function cleanSchema(schema: any): ZodTypeAny {
     return cleanSchema(schema._def.innerType).nullable() as ZodTypeAny;
   }
 
-  // ZodArray — recurse into element type
+  // ZodArray — recurse into element type, preserve length constraints
   if (typeName === 'ZodArray') {
     if (schema._def.type) {
-      return z.array(cleanSchema(schema._def.type)) as ZodTypeAny;
+      let arr = z.array(cleanSchema(schema._def.type)) as any;
+      if (schema._def.minLength !== null) arr = arr.min(schema._def.minLength.value);
+      if (schema._def.maxLength !== null) arr = arr.max(schema._def.maxLength.value);
+      if (schema._def.exactLength !== null) arr = arr.length(schema._def.exactLength.value);
+      return arr as ZodTypeAny;
     }
     return schema;
   }
@@ -98,8 +102,11 @@ function cleanSchema(schema: any): ZodTypeAny {
     return schema;
   }
 
-  // ZodPipeline — recurse into input
+  // ZodPipeline — clean both sides and rebuild
   if (typeName === 'ZodPipeline') {
+    if (schema._def.in && schema._def.out) {
+      return z.pipeline(cleanSchema(schema._def.in), cleanSchema(schema._def.out)) as ZodTypeAny;
+    }
     if (schema._def.in) {
       return cleanSchema(schema._def.in);
     }
