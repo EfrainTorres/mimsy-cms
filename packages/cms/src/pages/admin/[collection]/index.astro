@@ -66,6 +66,7 @@ function formatRelative(iso: string | undefined): string {
       <table class="w-full" id="mimsy-entries-table">
         <thead>
           <tr class="border-b border-stone-100">
+            <th class="pl-4 pr-1 py-3 w-8"><input type="checkbox" id="mimsy-select-all" class="rounded" title="Select all visible" /></th>
             <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Title</th>
             <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400">Status</th>
             <th class="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400 hidden md:table-cell">Modified</th>
@@ -83,6 +84,9 @@ function formatRelative(iso: string | undefined): string {
                 data-slug={entry.slug}
                 data-draft={isDraft ? 'true' : 'false'}
               >
+                <td class="pl-4 pr-1 py-3.5 w-8">
+                  <input type="checkbox" class="mimsy-row-check rounded" data-check-slug={entry.slug} />
+                </td>
                 <td class="px-5 py-3.5">
                   <a
                     href={`${config.basePath}/${collection}/${entry.slug}`}
@@ -131,6 +135,15 @@ function formatRelative(iso: string | undefined): string {
           <button id="mimsy-next" class="mimsy-filter-btn">Next</button>
         </div>
       </div>
+    </div>
+
+    <!-- Bulk operations bar -->
+    <div class="mimsy-bulk-bar" id="mimsy-bulk-bar" hidden>
+      <span class="mimsy-bulk-count" id="mimsy-bulk-count">0 selected</span>
+      <button class="mimsy-btn-secondary mimsy-btn-sm" id="mimsy-bulk-publish">Publish</button>
+      <button class="mimsy-btn-secondary mimsy-btn-sm" id="mimsy-bulk-unpublish">Unpublish</button>
+      <button class="mimsy-btn-danger mimsy-btn-sm" id="mimsy-bulk-delete">Delete</button>
+      <button class="mimsy-btn-secondary mimsy-btn-sm" id="mimsy-bulk-clear">Clear</button>
     </div>
 
     <script is:inline>
@@ -218,6 +231,145 @@ function formatRelative(iso: string | undefined): string {
         }
       });
 
+      render();
+
+      // ── Bulk Operations ──
+      var selectedSlugs = new Set();
+      var selectAllCb = document.getElementById('mimsy-select-all');
+      var bulkBar = document.getElementById('mimsy-bulk-bar');
+      var bulkCount = document.getElementById('mimsy-bulk-count');
+      var rowChecks = Array.from(document.querySelectorAll('.mimsy-row-check'));
+
+      // Extract collection name from URL: /admin/{collection}/
+      var pathParts = location.pathname.replace(/\/$/, '').split('/');
+      var bulkCollection = pathParts[pathParts.length - 1];
+
+      function updateBulkUI() {
+        var n = selectedSlugs.size;
+        if (bulkBar) bulkBar.hidden = n === 0;
+        if (bulkCount) bulkCount.textContent = n + ' selected';
+        // Sync checkboxes with set
+        rowChecks.forEach(function(cb) {
+          cb.checked = selectedSlugs.has(cb.dataset.checkSlug);
+        });
+        // Sync select-all
+        var visible = getFiltered();
+        var visibleSlugs = visible.map(function(r) { return r.dataset.slug; });
+        if (selectAllCb) {
+          var allChecked = visibleSlugs.length > 0 && visibleSlugs.every(function(s) { return selectedSlugs.has(s); });
+          selectAllCb.checked = allChecked;
+          selectAllCb.indeterminate = !allChecked && visibleSlugs.some(function(s) { return selectedSlugs.has(s); });
+        }
+      }
+
+      rowChecks.forEach(function(cb) {
+        cb.addEventListener('change', function() {
+          if (cb.checked) selectedSlugs.add(cb.dataset.checkSlug);
+          else selectedSlugs.delete(cb.dataset.checkSlug);
+          updateBulkUI();
+        });
+      });
+
+      if (selectAllCb) {
+        selectAllCb.addEventListener('change', function() {
+          var visible = getFiltered();
+          var start = currentPage * PAGE_SIZE;
+          var end = start + PAGE_SIZE;
+          var pageRows = visible.slice(start, end);
+          pageRows.forEach(function(r) {
+            if (selectAllCb.checked) selectedSlugs.add(r.dataset.slug);
+            else selectedSlugs.delete(r.dataset.slug);
+          });
+          updateBulkUI();
+        });
+      }
+
+      var bulkClearBtn = document.getElementById('mimsy-bulk-clear');
+      if (bulkClearBtn) bulkClearBtn.addEventListener('click', function() {
+        selectedSlugs.clear();
+        updateBulkUI();
+      });
+
+      function bulkToast(msg, type) {
+        window.dispatchEvent(new CustomEvent('mimsy:toast', { detail: { message: msg, type: type } }));
+      }
+
+      var bulkDeleteBtn = document.getElementById('mimsy-bulk-delete');
+      if (bulkDeleteBtn) bulkDeleteBtn.addEventListener('click', async function() {
+        var slugs = Array.from(selectedSlugs);
+        if (!slugs.length) return;
+        if (!confirm('Delete ' + slugs.length + ' entr' + (slugs.length === 1 ? 'y' : 'ies') + '? This cannot be undone.')) return;
+
+        var ok = 0, fail = 0;
+        for (var i = 0; i < slugs.length; i++) {
+          try {
+            var res = await fetch('/api/mimsy/content/' + bulkCollection + '/' + slugs[i], { method: 'DELETE' });
+            if (res.ok || res.status === 204) {
+              ok++;
+              selectedSlugs.delete(slugs[i]);
+              // Remove row from DOM
+              var row = rows.find(function(r) { return r.dataset.slug === slugs[i]; });
+              if (row) { row.remove(); rows = rows.filter(function(r) { return r !== row; }); }
+            } else { fail++; }
+          } catch { fail++; }
+        }
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        render();
+        updateBulkUI();
+        if (fail === 0) bulkToast('Deleted ' + ok + ' entr' + (ok === 1 ? 'y' : 'ies'), 'success');
+        else bulkToast('Deleted ' + ok + ' of ' + (ok + fail) + ' (' + fail + ' failed)', 'error');
+      });
+
+      var bulkPublishBtn = document.getElementById('mimsy-bulk-publish');
+      var bulkUnpublishBtn = document.getElementById('mimsy-bulk-unpublish');
+
+      async function bulkSetDraft(draft) {
+        var slugs = Array.from(selectedSlugs);
+        if (!slugs.length) return;
+        var ok = 0, fail = 0;
+        for (var i = 0; i < slugs.length; i++) {
+          try {
+            var res = await fetch('/api/mimsy/content/' + bulkCollection + '/' + slugs[i], {
+              method: 'PATCH',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ frontmatter: { draft: draft } }),
+            });
+            if (res.ok) {
+              ok++;
+              // Update row data + badge
+              var row = rows.find(function(r) { return r.dataset.slug === slugs[i]; });
+              if (row) {
+                row.dataset.draft = draft ? 'true' : 'false';
+                var badge = row.querySelector('.mimsy-status-badge');
+                if (badge) {
+                  badge.className = 'mimsy-status-badge ' + (draft ? 'mimsy-status-draft' : 'mimsy-status-published');
+                  var dot = badge.querySelector('.mimsy-status-dot');
+                  var text = draft ? 'Draft' : 'Published';
+                  badge.innerHTML = '';
+                  var newDot = document.createElement('span');
+                  newDot.className = 'mimsy-status-dot';
+                  badge.appendChild(newDot);
+                  badge.appendChild(document.createTextNode(' ' + text));
+                }
+              }
+            } else { fail++; }
+          } catch { fail++; }
+        }
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        render();
+        selectedSlugs.clear();
+        updateBulkUI();
+        var action = draft ? 'Unpublished' : 'Published';
+        if (fail === 0) bulkToast(action + ' ' + ok + ' entr' + (ok === 1 ? 'y' : 'ies'), 'success');
+        else bulkToast(action + ' ' + ok + ' of ' + (ok + fail) + ' (' + fail + ' failed)', 'error');
+      }
+
+      if (bulkPublishBtn) bulkPublishBtn.addEventListener('click', function() { bulkSetDraft(false); });
+      if (bulkUnpublishBtn) bulkUnpublishBtn.addEventListener('click', function() { bulkSetDraft(true); });
+
+      // Override original render to also sync checkboxes
+      var _origRender = render;
+      render = function() { _origRender(); updateBulkUI(); };
       render();
     })();
     </script>

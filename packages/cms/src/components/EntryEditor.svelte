@@ -45,15 +45,55 @@
   let restoredFrom = $state(''); // non-empty when content was restored but not yet saved
   let tiptapKey = $state(0);    // increment to force TiptapEditor remount on restore
 
-  // Autosave + save state
-  let saveState = $state('clean'); // 'clean' | 'dirty' | 'saving' | 'saved'
-  let autosaveTimer = null;
+  // Save state: 'clean' | 'draft' | 'saving' | 'saved' | 'error'
+  let saveState = $state('clean');
   let saveController = null;
+  let draftSyncTimer = null;
+  let structuralChangePending = false;
 
-  // Preview
-  let previewOpen = $state(
-    typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-preview') === 'open'
-  );
+  // Body editor modal (split layout: body opens in overlay)
+  let bodyModalOpen = $state(false);
+
+  // Mobile preview overlay
+  let mobilePreviewOpen = $state(false);
+
+  // Window width for responsive split layout detection
+  let windowWidth = $state(typeof window !== 'undefined' ? window.innerWidth : 1024);
+  let resizeTimer = null;
+  function handleResize() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => { windowWidth = window.innerWidth; }, 150);
+  }
+
+  // Duplicate dialog
+  let dupeOpen = $state(false);
+  let dupeSlug = $state('');
+  let dupeHint = $state(/** @type {'checking'|'available'|'taken'|'invalid'|''} */ (''));
+  let duplicating = $state(false);
+  let dupeCheckTimer = null;
+
+  // Rename dialog
+  let renameOpen = $state(false);
+  let renameSlug = $state('');
+  let renameHint = $state(/** @type {'checking'|'available'|'taken'|'invalid'|''} */ (''));
+  let renaming = $state(false);
+  let renameCheckTimer = null;
+  let renameUpdateRefs = $state(true);
+
+  const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
+
+  function checkSlugAvailability(value, setHint, timer) {
+    if (timer) clearTimeout(timer);
+    if (!value) { setHint(''); return null; }
+    if (!SLUG_PATTERN.test(value)) { setHint('invalid'); return null; }
+    setHint('checking');
+    return setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/mimsy/content/${collection}/${value}`, { method: 'HEAD' });
+        setHint(res.ok ? 'taken' : 'available');
+      } catch { setHint(''); }
+    }, 300);
+  }
 
   // Raw code view
   let showRaw = $state(false);
@@ -75,21 +115,70 @@
       .catch(() => { previewAvailable = 'no'; });
   }
 
-  let pendingDirty = false;
+  // Split layout: iframe left + fields right (desktop, content collection with route)
+  let splitLayout = $derived(
+    !isDataCollection && previewAvailable === 'yes' && !showRaw && windowWidth >= 1024
+  );
 
-  function scheduleAutosave() {
-    if (autosaveTimer) clearTimeout(autosaveTimer);
-    if (saveState === 'saving') { pendingDirty = true; return; }
-    // Don't autosave while probing — a save triggers full-reload which resets state
-    if (probeState === 'probing') { pendingDirty = true; return; }
-    saveState = 'dirty';
-    autosaveTimer = setTimeout(() => save(false), 1500);
+  // Close mobile preview when entering split layout (prevent duplicate iframe IDs)
+  $effect(() => { if (splitLayout && mobilePreviewOpen) mobilePreviewOpen = false; });
+
+  // Always include overlay query param — visual editing is always on
+  let iframeSrc = $derived(`${previewPath}?__mimsy=1`);
+
+  function isUrlLike(v) {
+    return /^(https?:\/\/|\/|\.\/|\.\.\/)/.test(v);
   }
 
-  onDestroy(() => {
-    if (autosaveTimer) clearTimeout(autosaveTimer);
-    if (saveController) saveController.abort();
-  });
+  function scheduleDraftSync() {
+    if (draftSyncTimer) clearTimeout(draftSyncTimer);
+    if (saveState !== 'draft' && saveState !== 'error') saveState = 'draft';
+    // Cancel in-flight probe (draft takes precedence)
+    if (probeState === 'probing') stopProbe(true);
+
+    draftSyncTimer = setTimeout(async () => {
+      // 1. Persist to sessionStorage (crash recovery)
+      try {
+        sessionStorage.setItem(`mimsy-draft-${collection}/${slug}`, JSON.stringify({
+          frontmatter: JSON.parse(JSON.stringify(frontmatter)),
+          bodyContent,
+          timestamp: Date.now(),
+        }));
+      } catch {}
+
+      // 2. Sync frontmatter to Vite server (for iframe preview)
+      if (!isDataCollection) {
+        try {
+          await fetch('/__mimsy_draft', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'set', collection, slug,
+              frontmatter: JSON.parse(JSON.stringify(frontmatter)),
+            }),
+          });
+        } catch {}
+
+        // 3. Reload iframe only for structural changes
+        if (structuralChangePending && (splitLayout || mobilePreviewOpen)) {
+          const iframe = document.getElementById('mimsy-preview-frame');
+          if (iframe) iframe.src = iframe.src;
+          structuralChangePending = false;
+        }
+      }
+    }, 300);
+  }
+
+  async function clearDraft() {
+    try { sessionStorage.removeItem(`mimsy-draft-${collection}/${slug}`); } catch {}
+    try {
+      await fetch('/__mimsy_draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear' }),
+      });
+    } catch {}
+  }
 
   // SEO field detection — unambiguous names only
   const SEO_NAMES = new Set([
@@ -151,21 +240,29 @@
 
   function handleFieldChange(key, value) {
     frontmatter[key] = value;
-    scheduleAutosave();
+
+    // Instant DOM patch for simple text fields (zero latency)
+    const fieldType = getFieldType(key, value);
+    if (typeof value === 'string' && fieldType === 'string' && !isUrlLike(value)) {
+      const iframe = document.getElementById('mimsy-preview-frame');
+      if (iframe?.contentWindow) {
+        iframe.contentWindow.postMessage({
+          type: 'mimsy:update', fieldPath: key, value,
+        }, location.origin);
+      }
+    } else {
+      structuralChangePending = true;
+    }
+
+    scheduleDraftSync();
   }
 
 
-  async function save(manual = true) {
-    if (autosaveTimer) clearTimeout(autosaveTimer);
-    // Block saves while probing — a save triggers Astro's full-reload broadcast
-    if (probeState === 'probing') {
-      pendingDirty = true;
-      return false;
-    }
+  async function save() {
+    if (draftSyncTimer) clearTimeout(draftSyncTimer);
     if (saveController) saveController.abort();
     saveController = new AbortController();
     const { signal } = saveController;
-    pendingDirty = false;
 
     saveState = 'saving';
     try {
@@ -179,21 +276,17 @@
       if (res.ok) {
         saveState = 'saved';
         restoredFrom = '';
+        recoveredDraft = null;
         historyRevision++;
-        if (manual) {
-          toast('Changes saved', 'success');
-          window.dispatchEvent(new CustomEvent('mimsy:mutate'));
-        }
-        if (manual && previewOpen) {
-          const iframe = document.getElementById('mimsy-preview-frame');
-          if (iframe) iframe.src = iframe.src;
-        }
+        clearDraft();
+        toast('Changes saved', 'success');
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        // File write triggers Vite HMR → iframe reloads with committed data
         setTimeout(() => { if (saveState === 'saved') saveState = 'clean'; }, 2000);
-        if (pendingDirty) scheduleAutosave();
         return true;
       } else {
         const data = await res.json();
-        saveState = 'dirty';
+        saveState = 'error';
         let msg = data.error || 'Failed to save.';
         if (data.fieldErrors) {
           const details = Object.entries(data.fieldErrors)
@@ -206,39 +299,96 @@
       }
     } catch (err) {
       if (err.name === 'AbortError') return false;
-      saveState = 'dirty';
+      saveState = 'error';
       toast('Network error. Please try again.', 'error');
       return false;
     }
   }
 
-  async function duplicate() {
-    const candidates = [slug + '-copy', ...Array.from({ length: 8 }, (_, i) => `${slug}-copy-${i + 2}`)];
-    for (const newSlug of candidates) {
-      try {
-        const res = await fetch(`/api/mimsy/content/${collection}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ slug: newSlug, frontmatter: JSON.parse(JSON.stringify(frontmatter)), content: bodyContent }),
-        });
-        if (res.ok) {
-          toast('Entry duplicated', 'success');
-          window.dispatchEvent(new CustomEvent('mimsy:mutate'));
-          navigate(`${basePath}/${collection}/${newSlug}`);
-          return;
-        }
-        if (res.status !== 409) {
-          const data = await res.json().catch(() => ({}));
-          toast(data.error || 'Failed to duplicate', 'error');
-          return;
-        }
-        // 409 — slug taken, try next candidate
-      } catch {
-        toast('Network error', 'error');
-        return;
+  function openDuplicateDialog() {
+    dupeSlug = slug + '-copy';
+    dupeHint = '';
+    duplicating = false;
+    dupeOpen = true;
+    dupeCheckTimer = checkSlugAvailability(dupeSlug, (h) => { dupeHint = h; }, dupeCheckTimer);
+  }
+
+  async function submitDuplicate() {
+    if (!dupeSlug || !SLUG_PATTERN.test(dupeSlug) || dupeHint === 'taken' || duplicating) return;
+    duplicating = true;
+    try {
+      const res = await fetch(`/api/mimsy/content/${collection}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ slug: dupeSlug, frontmatter: JSON.parse(JSON.stringify(frontmatter)), content: bodyContent }),
+      });
+      if (res.ok) {
+        toast('Entry duplicated', 'success');
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        dupeOpen = false;
+        navigate(`${basePath}/${collection}/${dupeSlug}`);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast(data.error || 'Failed to duplicate', 'error');
       }
+    } catch {
+      toast('Network error', 'error');
+    } finally {
+      duplicating = false;
     }
-    toast('Could not find a free slug. Rename the entry first.', 'error');
+  }
+
+  function openRenameDialog() {
+    renameSlug = slug;
+    renameHint = '';
+    renaming = false;
+    renameUpdateRefs = true;
+    renameOpen = true;
+  }
+
+  async function submitRename() {
+    if (!renameSlug || !SLUG_PATTERN.test(renameSlug) || renameSlug === slug || renameHint === 'taken' || renaming) return;
+    renaming = true;
+    try {
+      const res = await fetch(`/api/mimsy/content/${collection}/${slug}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ newSlug: renameSlug, updateReferences: renameUpdateRefs }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const refMsg = data.referencesUpdated > 0 ? ` (${data.referencesUpdated} reference${data.referencesUpdated === 1 ? '' : 's'} updated)` : '';
+        toast(`Renamed to ${data.slug}${refMsg}`, 'success');
+        window.dispatchEvent(new CustomEvent('mimsy:mutate'));
+        // Clear old draft
+        try { sessionStorage.removeItem(`mimsy-draft-${collection}/${slug}`); } catch {}
+        renameOpen = false;
+        navigate(`${basePath}/${collection}/${data.slug}`);
+      } else {
+        const data = await res.json().catch(() => ({}));
+        toast(data.error || 'Failed to rename', 'error');
+      }
+    } catch {
+      toast('Network error', 'error');
+    } finally {
+      renaming = false;
+    }
+  }
+
+  async function handleRollback() {
+    try {
+      const res = await fetch(`/api/mimsy/content/${collection}/${slug}`);
+      if (res.ok) {
+        const entry = await res.json();
+        frontmatter = entry.frontmatter;
+        bodyContent = entry.body ?? '';
+        tiptapKey++;
+        restoredFrom = '';
+        saveState = 'clean';
+        historyRevision++;
+        clearDraft();
+      }
+    } catch {}
   }
 
   async function del() {
@@ -261,7 +411,7 @@
 
   async function toggleDraft() {
     frontmatter.draft = !frontmatter.draft;
-    const ok = await save(false);
+    const ok = await save();
     if (ok) {
       toast(frontmatter.draft ? 'Moved to draft' : 'Published', 'success');
     } else {
@@ -269,28 +419,18 @@
     }
   }
 
-  function togglePreview() {
-    previewOpen = !previewOpen;
-    localStorage.setItem('mimsy-preview', previewOpen ? 'open' : 'closed');
+  function toggleMobilePreview() {
+    mobilePreviewOpen = !mobilePreviewOpen;
   }
 
   function handleRestore(fm, body, versionDate) {
     frontmatter = JSON.parse(JSON.stringify(fm));
     bodyContent = body;
     tiptapKey++; // remount TiptapEditor with restored content
-    saveState = 'dirty';
     const d = new Date(versionDate);
     restoredFrom = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
-  }
-
-  // Visual editing overlay
-  let visualEditEnabled = $state(
-    typeof localStorage !== 'undefined' && localStorage.getItem('mimsy-visual-edit') !== 'off'
-  );
-
-  function toggleVisualEdit() {
-    visualEditEnabled = !visualEditEnabled;
-    localStorage.setItem('mimsy-visual-edit', visualEditEnabled ? 'on' : 'off');
+    structuralChangePending = true;
+    scheduleDraftSync();
   }
 
   // --- Mutation Probing State Machine ---
@@ -323,6 +463,7 @@
       contentHash: djb2Hash(JSON.stringify(frontmatter)),
       probeMapping: probeMapping || null,
       mode: 'collection',
+      hasBody: !isDataCollection && bodyContent.length > 0,
     }, location.origin);
   }
 
@@ -431,13 +572,18 @@
     }
 
     if (d.type === 'mimsy:focus') {
-      previewOpen = false;
+      if (d.fieldPath === '__body__') {
+        bodyModalOpen = true;
+        return;
+      }
+      // In split layout, preview stays open; on mobile, close preview first
+      if (!splitLayout) mobilePreviewOpen = false;
       requestAnimationFrame(() => focusFieldInEditor(d.fieldPath));
     }
     if (d.type === 'mimsy:edit') {
       setNestedValue(frontmatter, d.fieldPath, d.value);
       frontmatter = { ...frontmatter };
-      scheduleAutosave();
+      scheduleDraftSync();
     }
     if (d.type === 'mimsy:reorder') {
       const from = d.from;
@@ -452,19 +598,70 @@
         const [item] = arr.splice(from, 1);
         arr.splice(to, 0, item);
         frontmatter = { ...frontmatter };
-        scheduleAutosave();
+        structuralChangePending = true;
+        scheduleDraftSync();
       }
     }
   }
 
-  // Clean up probe state on page unload or component unmount
-  function handleBeforeUnload() {
+  // Navigation guard + cleanup on page unload
+  function handleBeforeUnload(e) {
     if (probeState === 'probing') {
       navigator.sendBeacon('/__mimsy_probe', new Blob(
         [JSON.stringify({ action: 'stop' })],
         { type: 'application/json' },
       ));
     }
+    // Warn on unsaved draft
+    if (saveState === 'draft' || saveState === 'error') {
+      e.preventDefault();
+      e.returnValue = 'You have unsaved changes.';
+      return e.returnValue;
+    }
+  }
+
+  // Communicate dirty state to AdminLayout's navigation guard
+  $effect(() => {
+    if (typeof document !== 'undefined') {
+      if (saveState === 'draft' || saveState === 'error') {
+        document.body.setAttribute('data-mimsy-dirty', '');
+      } else {
+        document.body.removeAttribute('data-mimsy-dirty');
+      }
+    }
+  });
+
+  // Crash recovery: check for existing draft in sessionStorage
+  let recoveredDraft = $state(null);
+
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const stored = sessionStorage.getItem(`mimsy-draft-${collection}/${slug}`);
+      if (stored) {
+        const draft = JSON.parse(stored);
+        const currentHash = djb2Hash(JSON.stringify(initialFrontmatter) + initialBody);
+        const draftHash = djb2Hash(JSON.stringify(draft.frontmatter) + draft.bodyContent);
+        if (currentHash !== draftHash) {
+          recoveredDraft = draft;
+        } else {
+          sessionStorage.removeItem(`mimsy-draft-${collection}/${slug}`);
+        }
+      }
+    } catch {}
+  }
+
+  function recoverDraft() {
+    if (!recoveredDraft) return;
+    frontmatter = JSON.parse(JSON.stringify(recoveredDraft.frontmatter));
+    bodyContent = recoveredDraft.bodyContent;
+    tiptapKey++;
+    recoveredDraft = null;
+    scheduleDraftSync();
+  }
+
+  function discardRecoveredDraft() {
+    recoveredDraft = null;
+    try { sessionStorage.removeItem(`mimsy-draft-${collection}/${slug}`); } catch {}
   }
 
   if (typeof window !== 'undefined') {
@@ -477,6 +674,11 @@
       window.removeEventListener('message', handleOverlayMessage);
       window.removeEventListener('beforeunload', handleBeforeUnload);
     }
+    if (draftSyncTimer) clearTimeout(draftSyncTimer);
+    if (dupeCheckTimer) clearTimeout(dupeCheckTimer);
+    if (renameCheckTimer) clearTimeout(renameCheckTimer);
+    if (saveController) saveController.abort();
+    if (resizeTimer) clearTimeout(resizeTimer);
     if (probeTimeout) clearTimeout(probeTimeout);
     if (probeState === 'probing') {
       fetch('/__mimsy_probe', {
@@ -491,23 +693,32 @@
     // Cmd/Ctrl+S → manual save (with toast)
     if ((e.metaKey || e.ctrlKey) && e.key === 's') {
       e.preventDefault();
-      save(true);
+      save();
     }
-    // Escape — let command palette handle first if open
+    // Escape — close modals, then blur fields, then confirm discard, then navigate
     if (e.key === 'Escape') {
       const palette = document.getElementById('mimsy-palette');
       if (palette && !palette.hidden) return;
+      if (dupeOpen) { dupeOpen = false; return; }
+      if (renameOpen) { renameOpen = false; return; }
+      if (bodyModalOpen) { bodyModalOpen = false; return; }
+      if (mobilePreviewOpen) { mobilePreviewOpen = false; return; }
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
         document.activeElement.blur();
       } else {
+        if (saveState === 'draft' || saveState === 'error') {
+          if (!confirm('You have unsaved changes. Discard them?')) return;
+          clearDraft();
+          saveState = 'clean';
+        }
         navigate(`${basePath}/${collection}`);
       }
     }
   }
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
+<svelte:window onkeydown={handleKeydown} onresize={handleResize} />
 
 <HistoryDrawer
   {collection}
@@ -516,9 +727,10 @@
   revision={historyRevision}
   bind:open={historyOpen}
   onrestore={handleRestore}
+  onrollback={handleRollback}
 />
 
-<!-- Reusable fields card snippet (used in both two-column and single-column layouts) -->
+<!-- Reusable field snippets -->
 {#snippet fieldsCard()}
   <div class="mimsy-card p-5">
     <p class="mimsy-section-title">Fields</p>
@@ -576,10 +788,75 @@
   {/each}
 {/snippet}
 
+<!-- Shared header snippet for non-split layouts -->
+{#snippet editorHeader()}
+  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+    <div class="flex items-center gap-3 min-w-0">
+      <a href={`${basePath}/${collection}`} class="mimsy-btn-back" title="Back">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+      </a>
+      <h1 class="mimsy-page-heading truncate">{frontmatter.title || frontmatter.name || slug}</h1>
+    </div>
+    <div class="flex items-center gap-2 shrink-0">
+      {#if saveState === 'draft'}
+        <span class="mimsy-save-state mimsy-save-draft">Draft</span>
+      {:else if saveState === 'error'}
+        <span class="mimsy-save-state mimsy-save-error">Error</span>
+      {:else if saveState === 'saving'}
+        <span class="mimsy-save-state mimsy-save-saving">Saving…</span>
+      {:else if saveState === 'saved'}
+        <span class="mimsy-save-state mimsy-save-saved">Saved</span>
+      {/if}
+      <button onclick={toggleDraft} disabled={saveState === 'saving'}
+        class="mimsy-status-badge cursor-pointer transition-all hover:scale-105 disabled:opacity-50 {frontmatter.draft ? 'mimsy-status-draft' : 'mimsy-status-published'}">
+        <span class="mimsy-status-dot"></span>
+        {frontmatter.draft ? 'Draft' : 'Published'}
+      </button>
+      <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary" class:ring-2={showRaw} class:ring-violet-400={showRaw} title={showRaw ? 'Show form' : 'View raw data'}>
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
+      </button>
+      <button onclick={() => { historyOpen = !historyOpen; }} class="mimsy-btn-secondary" class:ring-2={historyOpen} class:ring-violet-400={historyOpen} title="Version history">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+      </button>
+      {#if !isDataCollection}
+        <button onclick={toggleMobilePreview} class="mimsy-btn-secondary" title="Preview">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
+        </button>
+      {/if}
+      <button onclick={openRenameDialog} class="mimsy-btn-secondary" title="Rename slug">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
+      </button>
+      <button onclick={openDuplicateDialog} class="mimsy-btn-secondary" title="Duplicate entry">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.688a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
+      </button>
+      <button onclick={() => save()} disabled={saveState === 'saving'} class="mimsy-btn-primary" class:ring-2={saveState === 'draft'} class:ring-violet-400={saveState === 'draft'}>
+        {saveState === 'saving' ? 'Saving...' : 'Save'}
+      </button>
+      <button onclick={del} class="mimsy-btn-danger">Delete</button>
+    </div>
+  </div>
+{/snippet}
+
 <div>
-  <!-- Restore banner -->
+  <!-- Crash recovery banner -->
+  {#if recoveredDraft}
+    <div class="mimsy-restore-banner" style={splitLayout ? 'margin: 0 1.25rem 0.5rem' : ''}>
+      <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z"/>
+      </svg>
+      <span>Unsaved draft from {new Date(recoveredDraft.timestamp).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}</span>
+      <button onclick={recoverDraft} class="ml-auto text-amber-800 hover:text-amber-900 font-semibold transition-colors text-xs" style="border:none;background:none;cursor:pointer;">Recover</button>
+      <button onclick={discardRecoveredDraft} class="ml-1 hover:text-amber-900 transition-colors" style="border:none;background:none;cursor:pointer;" title="Discard draft">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+  {/if}
+
+  <!-- Restore banner (version history) -->
   {#if restoredFrom}
-    <div class="mimsy-restore-banner">
+    <div class="mimsy-restore-banner" style={splitLayout ? 'margin: 0 1.25rem 0.5rem' : ''}>
       <svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/>
       </svg>
@@ -592,65 +869,85 @@
     </div>
   {/if}
 
-  <!-- Header -->
-  <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
-    <div class="flex items-center gap-3 min-w-0">
-      <a
-        href={`${basePath}/${collection}`}
-        class="mimsy-btn-back"
-        title="Back"
-      >
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
-      </a>
-      <h1 class="mimsy-page-heading truncate">
-        {frontmatter.title || frontmatter.name || slug}
-      </h1>
-    </div>
-    <div class="flex items-center gap-2 shrink-0">
-      {#if saveState === 'dirty'}
-        <span class="mimsy-save-state mimsy-save-dirty">Unsaved changes</span>
-      {:else if saveState === 'saving'}
-        <span class="mimsy-save-state mimsy-save-saving">Saving…</span>
-      {:else if saveState === 'saved'}
-        <span class="mimsy-save-state mimsy-save-saved">Saved</span>
-      {/if}
-      <button
-        onclick={toggleDraft}
-        disabled={saveState === 'saving'}
-        class="mimsy-status-badge cursor-pointer transition-all hover:scale-105 disabled:opacity-50 {frontmatter.draft ? 'mimsy-status-draft' : 'mimsy-status-published'}"
-      >
-        <span class="mimsy-status-dot"></span>
-        {frontmatter.draft ? 'Draft' : 'Published'}
-      </button>
-      <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary" class:ring-2={showRaw} class:ring-violet-400={showRaw} title={showRaw ? 'Show form' : 'View raw data'}>
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
-      </button>
-      <button onclick={() => { historyOpen = !historyOpen; }} class="mimsy-btn-secondary" class:ring-2={historyOpen} class:ring-violet-400={historyOpen} title="Version history">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
-      </button>
-      {#if !isDataCollection}
-        {#if previewOpen}
-          <button onclick={toggleVisualEdit} class="mimsy-btn-secondary" class:ring-2={visualEditEnabled} class:ring-blue-400={visualEditEnabled} title={visualEditEnabled ? 'Disable visual editing' : 'Enable visual editing'}>
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.042 21.672 13.684 16.6m0 0-2.51 2.225.569-9.47 5.227 7.917-3.286-.672Zm-7.518-.267A8.25 8.25 0 1 1 20.25 10.5M8.288 14.212A5.25 5.25 0 1 1 17.25 10.5" /></svg>
-          </button>
-        {/if}
-        <button onclick={togglePreview} class="mimsy-btn-secondary" title={previewOpen ? 'Close preview' : 'Open preview'}>
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" /><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" /></svg>
-        </button>
-      {/if}
-      <button onclick={duplicate} class="mimsy-btn-secondary" title="Duplicate entry">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.688a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
-      </button>
-      <button onclick={() => save(true)} disabled={saveState === 'saving'} class="mimsy-btn-primary">
-        {saveState === 'saving' ? 'Saving...' : 'Save'}
-      </button>
-      <button onclick={del} class="mimsy-btn-danger">Delete</button>
-    </div>
-  </div>
+  {#if splitLayout}
+    <!-- ═══ SPLIT LAYOUT: iframe left, fields right (desktop, content collections) ═══ -->
+    <div class="mimsy-split-layout">
+      <div class="mimsy-split-iframe">
+        <iframe id="mimsy-preview-frame" src={iframeSrc} title="Page preview"></iframe>
+      </div>
 
-  <div class="mimsy-editor-wrap">
-    {#if showRaw}
-      <!-- Raw data view -->
+      <div class="mimsy-split-panel">
+        <!-- Panel header: two clean rows -->
+        <div class="mimsy-split-panel-header" style="flex-direction:column;gap:0.375rem;">
+          <!-- Row 1: back + title + save state -->
+          <div class="flex items-center gap-2 w-full min-w-0">
+            <a href={`${basePath}/${collection}`} class="mimsy-btn-back" title="Back" style="width:1.5rem;height:1.5rem;flex-shrink:0;">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 19.5 8.25 12l7.5-7.5" /></svg>
+            </a>
+            <h1 class="text-sm font-semibold text-stone-800 truncate flex-1">{frontmatter.title || frontmatter.name || slug}</h1>
+            {#if saveState === 'draft'}
+              <span class="mimsy-save-state mimsy-save-draft text-[10px] shrink-0">Draft</span>
+            {:else if saveState === 'error'}
+              <span class="mimsy-save-state mimsy-save-error text-[10px] shrink-0">Error</span>
+            {:else if saveState === 'saving'}
+              <span class="mimsy-save-state mimsy-save-saving text-[10px] shrink-0">Saving…</span>
+            {:else if saveState === 'saved'}
+              <span class="mimsy-save-state mimsy-save-saved text-[10px] shrink-0">Saved</span>
+            {/if}
+          </div>
+          <!-- Row 2: actions -->
+          <div class="flex items-center gap-1.5 w-full">
+            <button onclick={toggleDraft} disabled={saveState === 'saving'}
+              class="mimsy-status-badge cursor-pointer text-[10px] {frontmatter.draft ? 'mimsy-status-draft' : 'mimsy-status-published'}">
+              <span class="mimsy-status-dot"></span>
+              {frontmatter.draft ? 'Draft' : 'Published'}
+            </button>
+            <div class="flex-1"></div>
+            <button onclick={() => { showRaw = !showRaw; }} class="mimsy-btn-secondary p-1.5" class:ring-2={showRaw} class:ring-violet-400={showRaw} title="Raw data">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.25 6.75 22.5 12l-5.25 5.25m-10.5 0L1.5 12l5.25-5.25m7.5-3-4.5 16.5" /></svg>
+            </button>
+            <button onclick={() => { historyOpen = !historyOpen; }} class="mimsy-btn-secondary p-1.5" class:ring-2={historyOpen} class:ring-violet-400={historyOpen} title="History">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+            </button>
+            <button onclick={openRenameDialog} class="mimsy-btn-secondary p-1.5" title="Rename">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125" /></svg>
+            </button>
+            <button onclick={openDuplicateDialog} class="mimsy-btn-secondary p-1.5" title="Duplicate">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 17.25v3.375c0 .621-.504 1.125-1.125 1.125h-9.75a1.125 1.125 0 0 1-1.125-1.125V7.875c0-.621.504-1.125 1.125-1.125H6.75a9.06 9.06 0 0 1 1.5.124m7.5 10.376h3.375c.621 0 1.125-.504 1.125-1.125V11.25c0-4.46-3.243-8.161-7.5-8.688a9.06 9.06 0 0 0-1.5-.124H9.375c-.621 0-1.125.504-1.125 1.125v3.5m7.5 10.375H9.375a1.125 1.125 0 0 1-1.125-1.125v-9.25m12 6.625v-1.875a3.375 3.375 0 0 0-3.375-3.375h-1.5a1.125 1.125 0 0 1-1.125-1.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H9.75" /></svg>
+            </button>
+            <button onclick={del} class="mimsy-btn-danger p-1.5" title="Delete">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" /></svg>
+            </button>
+            <button onclick={() => save()} disabled={saveState === 'saving'} class="mimsy-btn-primary text-xs px-2.5 py-1.5" class:ring-2={saveState === 'draft'} class:ring-violet-400={saveState === 'draft'}>Save</button>
+          </div>
+        </div>
+
+        <!-- Scrollable fields area -->
+        <div class="mimsy-split-panel-scroll space-y-4">
+          <!-- Body content button (opens modal editor) -->
+          <button
+            type="button"
+            onclick={() => { bodyModalOpen = true; }}
+            class="mimsy-card w-full text-left p-4 hover:border-violet-200 transition-colors cursor-pointer"
+            style="border-style: dashed;"
+          >
+            <p class="mimsy-section-title">Content</p>
+            <p class="text-xs text-stone-400 line-clamp-2">
+              {bodyContent ? bodyContent.slice(0, 120) + (bodyContent.length > 120 ? '…' : '') : 'Click to edit body content…'}
+            </p>
+          </button>
+
+          {@render fieldsCard()}
+          {@render seoCard()}
+          {@render blockCards()}
+        </div>
+      </div>
+    </div>
+
+  {:else if showRaw}
+    <!-- ═══ RAW DATA VIEW ═══ -->
+    <div class="max-w-7xl mx-auto px-5 py-7 lg:px-8 lg:py-9">
+      {@render editorHeader()}
       <div class="max-w-3xl">
         <div class="mimsy-card p-5">
           <div class="flex items-center justify-between mb-3">
@@ -667,63 +964,155 @@
           {/if}
         </div>
       </div>
-    {:else if !isDataCollection}
-      <!-- Two-column layout for content collections (xl+ = 1280px) -->
-      <div class="xl:grid xl:grid-cols-3 xl:gap-6">
-        <!-- Sidebar: fields + SEO -->
-        <div class="mb-5 xl:mb-0 xl:col-start-3">
-          <div class="xl:sticky xl:top-6 space-y-5">
-            {@render fieldsCard()}
-            {@render seoCard()}
-            {#if previewAvailable === 'no'}
-              <p class="text-[11px] text-stone-400 leading-relaxed px-1">No frontend route found for <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">/{collection}/{slug}</code>. Create <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">src/pages/{collection}/[...slug].astro</code> to enable preview.</p>
-            {/if}
-          </div>
-        </div>
+    </div>
 
-        <!-- Main: content editor + blocks -->
-        <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1 space-y-5">
-          <div class="mimsy-card p-5">
-            <p class="mimsy-section-title">Content</p>
-            {#key tiptapKey}
-              <TiptapEditor
-                content={bodyContent}
-                onchange={(md) => { bodyContent = md; scheduleAutosave(); }}
-              />
-            {/key}
-          </div>
-          {@render blockCards()}
-        </div>
-      </div>
-
-      <!-- Preview overlay (always in DOM, animated via CSS) -->
-      <div class="mimsy-preview-panel" class:mimsy-preview-open={previewOpen}>
-        <div class="mimsy-preview-header">
-          <span class="mimsy-section-title" style="margin-bottom:0">Preview</span>
-          <button onclick={togglePreview} class="mimsy-toast-close" title="Close preview">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
-          </button>
-        </div>
-        {#if previewOpen}
-          {#if previewAvailable === 'no'}
-            <div class="flex-1 flex items-center justify-center p-6">
-              <div class="text-center max-w-xs">
-                <p class="text-xs text-stone-400 leading-relaxed">No preview route found. Create a page to enable preview:</p>
-                <code class="block mt-2 text-[11px] text-stone-500 bg-stone-800/50 rounded px-2.5 py-1.5 font-mono">src/pages/{collection}/[...slug].astro</code>
-              </div>
+  {:else if !isDataCollection}
+    <!-- ═══ MOBILE / FORM-FIRST (content collections, <1024px or no preview) ═══ -->
+    <div class="max-w-7xl mx-auto px-5 py-7 lg:px-8 lg:py-9">
+      {@render editorHeader()}
+      <div class="mimsy-editor-wrap">
+        <div class="xl:grid xl:grid-cols-3 xl:gap-6">
+          <div class="mb-5 xl:mb-0 xl:col-start-3">
+            <div class="xl:sticky xl:top-6 space-y-5">
+              {@render fieldsCard()}
+              {@render seoCard()}
+              {#if previewAvailable === 'no'}
+                <p class="text-[11px] text-stone-400 leading-relaxed px-1">No frontend route found for <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">/{collection}/{slug}</code>. Create <code class="text-stone-500 bg-stone-800/40 rounded px-1 py-0.5 text-[10px]">src/pages/{collection}/[...slug].astro</code> to enable preview.</p>
+              {/if}
             </div>
-          {:else}
-            <iframe id="mimsy-preview-frame" src={visualEditEnabled ? `${previewPath}?__mimsy=1` : previewPath} title="Page preview" class="mimsy-preview-iframe"></iframe>
-          {/if}
-        {/if}
+          </div>
+          <div class="xl:col-start-1 xl:col-span-2 xl:row-start-1 space-y-5">
+            <div class="mimsy-card p-5">
+              <p class="mimsy-section-title">Content</p>
+              {#key tiptapKey}
+                <TiptapEditor
+                  content={bodyContent}
+                  onchange={(md) => { bodyContent = md; structuralChangePending = true; scheduleDraftSync(); }}
+                />
+              {/key}
+            </div>
+            {@render blockCards()}
+          </div>
+        </div>
       </div>
-    {:else}
-      <!-- Single column for data collections -->
+    </div>
+
+  {:else}
+    <!-- ═══ DATA COLLECTIONS (single column, no preview) ═══ -->
+    <div class="max-w-7xl mx-auto px-5 py-7 lg:px-8 lg:py-9">
+      {@render editorHeader()}
       <div class="max-w-2xl space-y-5">
         {@render fieldsCard()}
         {@render blockCards()}
         {@render seoCard()}
       </div>
+    </div>
+  {/if}
+</div>
+
+<!-- ═══ BODY EDITOR MODAL ═══ -->
+<div class="mimsy-body-modal-backdrop" class:mimsy-body-modal-open={bodyModalOpen}
+  onclick={() => { bodyModalOpen = false; }}
+  role="presentation"
+></div>
+<div class="mimsy-body-modal" class:mimsy-body-modal-open={bodyModalOpen}>
+  <div class="mimsy-body-modal-header">
+    <p class="mimsy-section-title" style="margin-bottom:0">Content</p>
+    <div class="flex items-center gap-3">
+      <span class="text-xs text-stone-400">{bodyContent.length} chars</span>
+      <button onclick={() => { bodyModalOpen = false; }} class="mimsy-toast-close" title="Close">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="mimsy-body-modal-body">
+    {#if bodyModalOpen}
+      {#key tiptapKey}
+        <TiptapEditor
+          content={bodyContent}
+          onchange={(md) => { bodyContent = md; structuralChangePending = true; scheduleDraftSync(); }}
+        />
+      {/key}
     {/if}
   </div>
 </div>
+
+<!-- ═══ MOBILE PREVIEW MODAL ═══ -->
+{#if !isDataCollection}
+  <div class="mimsy-mobile-preview" class:mimsy-mobile-preview-open={mobilePreviewOpen}>
+    <div class="mimsy-preview-header">
+      <span class="mimsy-section-title" style="margin-bottom:0">Preview</span>
+      <button onclick={() => { mobilePreviewOpen = false; }} class="mimsy-toast-close" title="Close preview">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12"/></svg>
+      </button>
+    </div>
+    {#if mobilePreviewOpen}
+      <iframe id="mimsy-preview-frame" src={iframeSrc} title="Page preview" class="flex-1 w-full border-none"></iframe>
+    {/if}
+  </div>
+{/if}
+
+<!-- ═══ DUPLICATE DIALOG ═══ -->
+{#if dupeOpen}
+  <div class="mimsy-dialog-overlay" onclick={(e) => { if (e.target === e.currentTarget) dupeOpen = false; }}>
+    <div class="mimsy-dialog-panel">
+      <div class="mimsy-dialog-title">Duplicate Entry</div>
+      <label class="mimsy-label" for="mimsy-dupe-slug">New slug</label>
+      <input
+        id="mimsy-dupe-slug"
+        type="text"
+        class="mimsy-input w-full"
+        style="font-family: var(--mimsy-font-mono);"
+        bind:value={dupeSlug}
+        oninput={() => { dupeCheckTimer = checkSlugAvailability(dupeSlug, (h) => { dupeHint = h; }, dupeCheckTimer); }}
+        onkeydown={(e) => { if (e.key === 'Enter') submitDuplicate(); }}
+      />
+      <div class="mimsy-dialog-hint {dupeHint === 'available' ? 'mimsy-dialog-hint-ok' : dupeHint === 'taken' || dupeHint === 'invalid' ? 'mimsy-dialog-hint-err' : 'mimsy-dialog-hint-muted'}">
+        {#if dupeHint === 'checking'}Checking...{:else if dupeHint === 'available'}Available{:else if dupeHint === 'taken'}Already taken{:else if dupeHint === 'invalid'}Invalid slug format{/if}
+      </div>
+      <div class="mimsy-dialog-actions">
+        <button class="mimsy-btn-secondary" onclick={() => { dupeOpen = false; }}>Cancel</button>
+        <button class="mimsy-btn-primary" onclick={submitDuplicate}
+          disabled={duplicating || !dupeSlug || dupeHint === 'taken' || dupeHint === 'invalid' || dupeHint === 'checking'}>
+          {duplicating ? 'Duplicating...' : 'Duplicate'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- ═══ RENAME DIALOG ═══ -->
+{#if renameOpen}
+  <div class="mimsy-dialog-overlay" onclick={(e) => { if (e.target === e.currentTarget) renameOpen = false; }}>
+    <div class="mimsy-dialog-panel">
+      <div class="mimsy-dialog-title">Rename Entry</div>
+      <label class="mimsy-label" for="mimsy-rename-slug">New slug</label>
+      <input
+        id="mimsy-rename-slug"
+        type="text"
+        class="mimsy-input w-full"
+        style="font-family: var(--mimsy-font-mono);"
+        bind:value={renameSlug}
+        oninput={() => {
+          if (renameSlug === slug) { renameHint = ''; }
+          else { renameCheckTimer = checkSlugAvailability(renameSlug, (h) => { renameHint = h; }, renameCheckTimer); }
+        }}
+        onkeydown={(e) => { if (e.key === 'Enter') submitRename(); }}
+      />
+      <div class="mimsy-dialog-hint {renameHint === 'available' ? 'mimsy-dialog-hint-ok' : renameHint === 'taken' || renameHint === 'invalid' ? 'mimsy-dialog-hint-err' : 'mimsy-dialog-hint-muted'}">
+        {#if renameSlug === slug}Enter a different slug{:else if renameHint === 'checking'}Checking...{:else if renameHint === 'available'}Available{:else if renameHint === 'taken'}Already taken{:else if renameHint === 'invalid'}Invalid slug format{/if}
+      </div>
+      <label class="flex items-center gap-2 mt-3 text-xs text-stone-600 cursor-pointer">
+        <input type="checkbox" bind:checked={renameUpdateRefs} class="rounded" />
+        Update references in other entries
+      </label>
+      <div class="mimsy-dialog-actions">
+        <button class="mimsy-btn-secondary" onclick={() => { renameOpen = false; }}>Cancel</button>
+        <button class="mimsy-btn-primary" onclick={submitRename}
+          disabled={renaming || !renameSlug || renameSlug === slug || renameHint === 'taken' || renameHint === 'invalid' || renameHint === 'checking'}>
+          {renaming ? 'Renaming...' : 'Rename'}
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}

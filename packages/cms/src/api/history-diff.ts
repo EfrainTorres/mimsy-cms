@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 // Cached once per process — repo root never changes at runtime.
 // undefined = not yet tried, null = tried and no git repo found (failure also cached).
 let cachedRepoRoot: string | null | undefined = undefined;
-async function getRepoRoot(cwd: string): Promise<string | null> {
+export async function getRepoRoot(cwd: string): Promise<string | null> {
   if (cachedRepoRoot !== undefined) return cachedRepoRoot;
   try {
     const { stdout } = await execFileAsync('git', ['rev-parse', '--show-toplevel'], { cwd });
@@ -25,10 +25,10 @@ async function getRepoRoot(cwd: string): Promise<string | null> {
 
 // Bounded SHA content cache — SHA content is immutable so TTL is not needed.
 // Evict oldest when full (simple FIFO bounded cache).
-const shaCache = new Map<string, string>(); // `${sha}:${relPath}` → raw content
+export const shaCache = new Map<string, string>(); // `${sha}:${relPath}` → raw content
 const MAX_SHA_CACHE = 100;
 
-function cacheSha(key: string, content: string) {
+export function cacheSha(key: string, content: string) {
   if (shaCache.size >= MAX_SHA_CACHE) {
     shaCache.delete(shaCache.keys().next().value!);
   }
@@ -36,7 +36,7 @@ function cacheSha(key: string, content: string) {
 }
 
 /** Parse a raw file string into { frontmatter, body }. Handles .json too. */
-function parseRaw(raw: string, isJson: boolean): { frontmatter: Record<string, unknown>; body: string } {
+export function parseRaw(raw: string, isJson: boolean): { frontmatter: Record<string, unknown>; body: string } {
   if (isJson) {
     try {
       return { frontmatter: JSON.parse(raw), body: '' };
@@ -221,7 +221,7 @@ async function getGitHubDiff(
   });
 }
 
-async function fetchGitHubFileAtSha(
+export async function fetchGitHubFileAtSha(
   owner: string,
   repo: string,
   filePath: string,

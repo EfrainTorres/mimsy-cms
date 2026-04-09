@@ -133,6 +133,46 @@ function cleanSchema(schema: any): ZodTypeAny {
     return schema;
   }
 
+  // ZodCatch — unwrap and re-wrap with catch value
+  if (typeName === 'ZodCatch') {
+    return cleanSchema(schema._def.innerType).catch(schema._def.catchValue()) as ZodTypeAny;
+  }
+
+  // ZodBranded — pure type marker, unwrap to inner schema
+  if (typeName === 'ZodBranded') {
+    return cleanSchema(schema._def.type);
+  }
+
+  // ZodReadonly — pure type marker, unwrap to inner schema
+  if (typeName === 'ZodReadonly') {
+    return cleanSchema(schema._def.innerType);
+  }
+
+  // ZodTuple — clean each item, preserve rest element
+  if (typeName === 'ZodTuple') {
+    const cleaned = (schema._def.items ?? []).map((i: any) => cleanSchema(i));
+    let result: any = z.tuple(cleaned as any);
+    if (schema._def.rest) result = result.rest(cleanSchema(schema._def.rest));
+    return result as ZodTypeAny;
+  }
+
+  // ZodIntersection — clean both sides and rebuild
+  if (typeName === 'ZodIntersection') {
+    return z.intersection(cleanSchema(schema._def.left), cleanSchema(schema._def.right)) as ZodTypeAny;
+  }
+
+  // ZodRecord — clean key and value types
+  if (typeName === 'ZodRecord') {
+    const kt = schema._def.keyType ? cleanSchema(schema._def.keyType) : z.string();
+    const vt = schema._def.valueType ? cleanSchema(schema._def.valueType) : z.any();
+    return z.record(kt, vt) as ZodTypeAny;
+  }
+
+  // ZodLazy — passthrough (recursive evaluation unsafe)
+  if (typeName === 'ZodLazy') {
+    return schema;
+  }
+
   // Primitives (string, number, boolean, date, enum, etc.) — keep as-is
   return schema;
 }

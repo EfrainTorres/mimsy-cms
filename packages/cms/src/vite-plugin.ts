@@ -118,6 +118,10 @@ function clearProbe() {
   if (probeTimeout) { clearTimeout(probeTimeout); probeTimeout = null; }
 }
 
+function clearDraft() {
+  (globalThis as any).__mimsyDraft = null;
+}
+
 /** Read a JSON body from an IncomingMessage. */
 function readJsonBody(req: IncomingMessage): Promise<any> {
   return new Promise((resolve, reject) => {
@@ -132,12 +136,12 @@ function readJsonBody(req: IncomingMessage): Promise<any> {
 }
 
 /**
- * Vite plugin for mutation probing. Separate from vitePluginMimsy so
- * enforce: 'post' doesn't affect virtual module resolution order.
+ * Vite plugin for mutation probing and draft injection. Separate from
+ * vitePluginMimsy so enforce: 'post' doesn't affect virtual module resolution.
  *
- * - configureServer: adds /__mimsy_probe POST endpoint
+ * - configureServer: adds /__mimsy_probe and /__mimsy_draft POST endpoints
  * - transform: wraps getEntry/getCollection in astro:content to inject
- *   probe sentinels at render time (dev mode only)
+ *   draft data or probe sentinels at render time (dev mode only)
  */
 export function vitePluginMimsyProbe(): Plugin {
   let isDev = false;
@@ -182,6 +186,40 @@ export function vitePluginMimsyProbe(): Plugin {
           res.end(JSON.stringify({ error: 'Invalid JSON body' }));
         });
       });
+
+      // Draft injection endpoint — stores frontmatter in server memory for preview
+      _server.middlewares.use((req: IncomingMessage, res: ServerResponse, next: () => void) => {
+        if (req.url !== '/__mimsy_draft' || req.method !== 'POST') return next();
+
+        readJsonBody(req).then((data) => {
+          if (data.action === 'set') {
+            if (!data.collection || !data.slug || !data.frontmatter) {
+              res.writeHead(400, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify({ error: 'Missing collection, slug, or frontmatter' }));
+              return;
+            }
+            // Draft takes precedence — clear any active probe
+            clearProbe();
+            (globalThis as any).__mimsyDraft = {
+              collection: data.collection,
+              slug: data.slug,
+              frontmatter: data.frontmatter,
+            };
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } else if (data.action === 'clear') {
+            clearDraft();
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ ok: true }));
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unknown action' }));
+          }
+        }).catch(() => {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+        });
+      });
     },
 
     transform(code: string, id: string) {
@@ -210,9 +248,10 @@ export function vitePluginMimsyProbe(): Plugin {
 
 /**
  * Runtime code appended to astro:content module.
- * Wraps all data-returning functions to inject probe sentinels when active.
- * When globalThis.__mimsyProbe is falsy (99.99% of the time), each wrapper
- * does a single falsy check and returns the original result — zero overhead.
+ * Wraps all data-returning functions to inject draft data or probe sentinels.
+ * Priority: draft > probe > original. When both globalThis.__mimsyDraft and
+ * __mimsyProbe are null (99.99% of the time), each wrapper does two falsy
+ * checks and returns the original result — zero overhead.
  */
 const PROBE_WRAPPER = `
 ;(function __mimsyProbeInit() {
@@ -228,11 +267,44 @@ const PROBE_WRAPPER = `
     cur[last] = val;
   }
 
-  function __probeEntry(entry) {
-    var p = globalThis.__mimsyProbe;
-    if (!p || !entry) return entry;
+  // Coerce a draft value to match the Astro-processed original type
+  function __coerce(orig, draft) {
+    if (orig instanceof Date && typeof draft === 'string') {
+      var d = new Date(draft); return isNaN(d.getTime()) ? orig : d;
+    }
+    if (orig && typeof orig === 'object' && orig.collection && orig.id && typeof draft === 'string') {
+      return Object.assign({}, orig, { id: draft });
+    }
+    if (Array.isArray(orig) && Array.isArray(draft) && orig.length > 0 && orig[0] && typeof orig[0] === 'object' && orig[0].collection) {
+      var rc = orig[0].collection;
+      return draft.map(function(v) { return typeof v === 'string' ? { collection: rc, id: v } : v; });
+    }
+    if (typeof orig === 'number' && typeof draft === 'string') {
+      var n = Number(draft); return isNaN(n) ? draft : n;
+    }
+    return draft;
+  }
+
+  function __draftOrProbeEntry(entry) {
+    if (!entry) return entry;
     var collection = entry.collection;
     var id = entry.id ?? entry.slug;
+
+    // Draft check first (merge onto original, coercing types to match Astro's processed data)
+    var d = globalThis.__mimsyDraft;
+    if (d && collection === d.collection && id === d.slug) {
+      var data = structuredClone(entry.data);
+      for (var k in d.frontmatter) {
+        if (Object.prototype.hasOwnProperty.call(d.frontmatter, k)) {
+          data[k] = __coerce(data[k], d.frontmatter[k]);
+        }
+      }
+      return Object.assign({}, entry, { data: data });
+    }
+
+    // Probe check (sentinel injection into individual fields)
+    var p = globalThis.__mimsyProbe;
+    if (!p) return entry;
     if (collection !== p.collection || id !== p.slug) return entry;
     var data = structuredClone(entry.data);
     for (var pid in p.probeMap) {
@@ -243,15 +315,15 @@ const PROBE_WRAPPER = `
 
   var __ge = getEntry;
   getEntry = async function() {
-    return __probeEntry(await __ge.apply(this, arguments));
+    return __draftOrProbeEntry(await __ge.apply(this, arguments));
   };
 
   if (typeof getCollection !== 'undefined') {
     var __gc = getCollection;
     getCollection = async function() {
       var entries = await __gc.apply(this, arguments);
-      if (!globalThis.__mimsyProbe || !Array.isArray(entries)) return entries;
-      return entries.map(__probeEntry);
+      if ((!globalThis.__mimsyDraft && !globalThis.__mimsyProbe) || !Array.isArray(entries)) return entries;
+      return entries.map(__draftOrProbeEntry);
     };
   }
 
@@ -259,22 +331,22 @@ const PROBE_WRAPPER = `
     var __ges = getEntries;
     getEntries = async function() {
       var entries = await __ges.apply(this, arguments);
-      if (!globalThis.__mimsyProbe || !Array.isArray(entries)) return entries;
-      return entries.map(__probeEntry);
+      if ((!globalThis.__mimsyDraft && !globalThis.__mimsyProbe) || !Array.isArray(entries)) return entries;
+      return entries.map(__draftOrProbeEntry);
     };
   }
 
   if (typeof getEntryBySlug !== 'undefined') {
     var __gebs = getEntryBySlug;
     getEntryBySlug = async function() {
-      return __probeEntry(await __gebs.apply(this, arguments));
+      return __draftOrProbeEntry(await __gebs.apply(this, arguments));
     };
   }
 
   if (typeof getDataEntryById !== 'undefined') {
     var __gdbi = getDataEntryById;
     getDataEntryById = async function() {
-      return __probeEntry(await __gdbi.apply(this, arguments));
+      return __draftOrProbeEntry(await __gdbi.apply(this, arguments));
     };
   }
 })();

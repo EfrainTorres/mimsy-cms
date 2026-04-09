@@ -82,11 +82,22 @@ function introspectField(name: string, schema: any): SchemaField {
       continue;
     }
 
-    if (typeName === 'ZodDefault') {
+    if (typeName === 'ZodDefault' || typeName === 'ZodCatch') {
       required = false;
       try {
-        defaultValue = current._def.defaultValue();
+        const fn = typeName === 'ZodDefault' ? current._def.defaultValue : current._def.catchValue;
+        if (typeof fn === 'function') defaultValue = fn();
       } catch {}
+      current = current._def.innerType;
+      continue;
+    }
+
+    if (typeName === 'ZodBranded') {
+      current = current._def.type;
+      continue;
+    }
+
+    if (typeName === 'ZodReadonly') {
       current = current._def.innerType;
       continue;
     }
@@ -189,6 +200,28 @@ function introspectBaseType(schema: any): Omit<SchemaField, 'name' | 'required' 
       return { type: 'object', objectFields };
     }
 
+    case 'ZodTuple': {
+      const items: any[] = schema._def.items ?? [];
+      if (!items.length) return { type: 'array', arrayItemType: { type: 'unknown' } };
+      const first = introspectBaseType(items[0]);
+      const allSame = items.every((i: any) => introspectBaseType(i).type === first.type);
+      return { type: 'array', arrayItemType: allSame ? first : { type: 'unknown' } };
+    }
+
+    case 'ZodIntersection': {
+      const left = introspectBaseType(schema._def.left);
+      const right = introspectBaseType(schema._def.right);
+      if (left.type === 'object' && right.type === 'object')
+        return { type: 'object', objectFields: [...(left.objectFields ?? []), ...(right.objectFields ?? [])] };
+      if (left.type === 'object') return left;
+      if (right.type === 'object') return right;
+      return { type: 'unknown' };
+    }
+
+    case 'ZodRecord':
+    case 'ZodLazy':
+      return { type: 'unknown' };
+
     default:
       return { type: 'unknown' };
   }
@@ -208,8 +241,10 @@ function unwrapArrayElement(schema: any): any {
       inner = inner._def.in;
     } else if (tn === 'ZodOptional' || tn === 'ZodNullable') {
       inner = inner._def.innerType;
-    } else if (tn === 'ZodDefault') {
+    } else if (tn === 'ZodDefault' || tn === 'ZodCatch' || tn === 'ZodReadonly') {
       inner = inner._def.innerType;
+    } else if (tn === 'ZodBranded') {
+      inner = inner._def.type;
     } else {
       break;
     }
@@ -312,8 +347,12 @@ function extractLiteralValue(schema: any): string | number | boolean | null {
   while (s?._def) {
     const tn = s._def.typeName;
     if (tn === 'ZodLiteral') return s._def.value;
-    if (tn === 'ZodOptional' || tn === 'ZodNullable' || tn === 'ZodDefault') {
+    if (tn === 'ZodOptional' || tn === 'ZodNullable' || tn === 'ZodDefault' || tn === 'ZodCatch' || tn === 'ZodReadonly') {
       s = s._def.innerType;
+      continue;
+    }
+    if (tn === 'ZodBranded') {
+      s = s._def.type;
       continue;
     }
     break;

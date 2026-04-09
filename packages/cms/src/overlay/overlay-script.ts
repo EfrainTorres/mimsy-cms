@@ -21,6 +21,29 @@ export const OVERLAY_SCRIPT = `(function(){
   var arrayRegions = null;    // Map<arrayPath, [{ index, region }]> — computed by co-occurrence matching
   var dragHandles = [];       // cleanup references
   var storedProbeMapping = null; // Durable probe mapping — survives DOM churn
+  var bodyRegion = null;        // Detected body/prose container for modal trigger
+  var hasBody = false;          // Whether editor has body content to detect
+
+  function detectBodyRegion() {
+    bodyRegion = null;
+    if (!hasBody) return;
+    var selectors = [
+      '[data-mimsy-body]', '.prose', 'article', 'main .content', '.content'
+    ];
+    for (var i = 0; i < selectors.length; i++) {
+      var el = document.querySelector(selectors[i]);
+      if (!el) continue;
+      // Skip if this element is already mapped to a frontmatter field
+      var mapped = false;
+      if (fieldToElement) {
+        fieldToElement.forEach(function(v) { if (v.element === el) mapped = true; });
+      }
+      if (!mapped && el.textContent && el.textContent.trim().length > 50) {
+        bodyRegion = el;
+        return;
+      }
+    }
+  }
 
   // --- Overlay DOM ---
   var highlight = document.createElement('div');
@@ -396,6 +419,7 @@ export const OVERLAY_SCRIPT = `(function(){
     highlight.style.left = r.left - 2 + 'px';
     highlight.style.width = r.width + 4 + 'px';
     highlight.style.height = r.height + 4 + 'px';
+    highlight.style.borderColor = '#3b82f6'; // reset to default blue
     highlight.style.opacity = '1';
   }
 
@@ -439,6 +463,12 @@ export const OVERLAY_SCRIPT = `(function(){
           ? match.fieldPath + '  \u00b7  ' + modKey + '+click \u2192 form'
           : match.fieldPath + '  \u00b7  click \u2192 form';
         showTooltip(tip);
+      } else if (bodyRegion && bodyRegion.contains(el)) {
+        positionHighlight(bodyRegion);
+        highlight.style.borderStyle = 'dashed';
+        highlight.style.borderColor = '#8b5cf6';
+        highlight.style.background = 'rgba(139, 92, 246, 0.04)';
+        showTooltip('body content \u00b7 click to edit');
       } else {
         hideHighlight();
       }
@@ -472,6 +502,12 @@ export const OVERLAY_SCRIPT = `(function(){
 
     var match = findMatch(e.target);
     if (!match || match.confidence < MED) {
+      // Check if click is inside body region
+      if (bodyRegion && bodyRegion.contains(e.target)) {
+        e.preventDefault();
+        window.parent.postMessage({ type: 'mimsy:focus', fieldPath: '__body__' }, location.origin);
+        return;
+      }
       deselect();
       return;
     }
@@ -967,6 +1003,7 @@ export const OVERLAY_SCRIPT = `(function(){
 
     if (d.type === 'mimsy:init') {
       candidates = d.candidates;
+      hasBody = !!d.hasBody;
       if (d.contentHash === cacheHash && mappings) {
         // Verify cached elements still in DOM
         var valid = true;
@@ -976,6 +1013,7 @@ export const OVERLAY_SCRIPT = `(function(){
         if (valid) {
           reportMapped();
           setupDragHandles();
+          detectBodyRegion();
           return;
         }
       }
@@ -1013,6 +1051,7 @@ export const OVERLAY_SCRIPT = `(function(){
       cacheHash = d.contentHash || '';
       reportMapped();
       setupDragHandles();
+      detectBodyRegion();
     }
 
     if (d.type === 'mimsy:highlight' && fieldToElement) {
@@ -1027,6 +1066,17 @@ export const OVERLAY_SCRIPT = `(function(){
 
     if (d.type === 'mimsy:unhighlight') {
       hideHighlight();
+    }
+
+    // Instant DOM patching — update text content without iframe reload
+    if (d.type === 'mimsy:update' && fieldToElement) {
+      var entry = fieldToElement.get(d.fieldPath);
+      if (entry && entry.element) {
+        var m = mappings ? mappings.get(entry.element) : null;
+        if (m && m.candidate && m.candidate.matchMode !== 'attribute') {
+          entry.element.textContent = d.value;
+        }
+      }
     }
   });
 

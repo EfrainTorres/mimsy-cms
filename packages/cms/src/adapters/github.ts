@@ -140,22 +140,24 @@ export class GitHubContentAdapter implements ContentAdapter {
     collection: string,
     slug: string,
     frontmatter: Record<string, unknown>,
-    body: string
+    body: string,
+    commitMessage?: string,
   ): Promise<void> {
+    const msg = commitMessage ?? `Update: ${collection}/${slug}`;
     // Check if existing file is JSON
     const ext = await this.findFileExtension(collection, slug);
 
     if (ext === '.json') {
       const filePath = `${this.contentPath}/${collection}/${slug}.json`;
       const content = JSON.stringify(frontmatter, null, 2) + '\n';
-      await this.commitFile(filePath, content, 'utf-8', `Update: ${collection}/${slug}`);
+      await this.commitFile(filePath, content, 'utf-8', msg);
       return;
     }
 
     if (ext === '.md' || ext === '.mdx') {
       const filePath = `${this.contentPath}/${collection}/${slug}${ext}`;
       const content = matter.stringify('\n' + body, frontmatter);
-      await this.commitFile(filePath, content, 'utf-8', `Update: ${collection}/${slug}`);
+      await this.commitFile(filePath, content, 'utf-8', msg);
       return;
     }
 

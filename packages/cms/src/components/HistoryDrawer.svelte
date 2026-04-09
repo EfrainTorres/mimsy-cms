@@ -6,7 +6,8 @@
     slug,
     isDataCollection = false,
     open = $bindable(false),
-    onrestore,  // (frontmatter, body) => void
+    onrestore,  // (frontmatter, body, versionDate) => void
+    onrollback, // () => void — called after successful rollback (saves to disk)
     revision = 0,  // incremented by parent on each successful save
   } = $props();
 
@@ -24,6 +25,8 @@
   let diff = $state(null);
   let diffLoading = $state(false);
   let diffError = $state('');
+  let confirmRollback = $state(false);
+  let rolling = $state(false);
 
   // Group consecutive saves by same author within 5 minutes
   let groupedVersions = $derived(groupVersions(versions));
@@ -111,6 +114,7 @@
     diff = null;
     diffError = '';
     diffLoading = true;
+    confirmRollback = false;
 
     try {
       const params = new URLSearchParams({ collection, slug, sha: version.sha });
@@ -129,6 +133,35 @@
     if (!diff) return;
     onrestore(diff.frontmatter, diff.body, selectedVersion.date);
     open = false;
+  }
+
+  async function rollback() {
+    if (!diff || !selectedVersion || rolling) return;
+    rolling = true;
+    try {
+      const res = await fetch('/api/mimsy/history/rollback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          collection, slug,
+          sha: selectedVersion.sha,
+          date: selectedVersion.date,
+        }),
+      });
+      if (!res.ok) throw new Error('Rollback failed');
+      window.dispatchEvent(new CustomEvent('mimsy:toast', {
+        detail: { message: 'Rolled back successfully', type: 'success' },
+      }));
+      onrollback?.();
+      open = false;
+    } catch {
+      window.dispatchEvent(new CustomEvent('mimsy:toast', {
+        detail: { message: 'Rollback failed', type: 'error' },
+      }));
+    } finally {
+      rolling = false;
+      confirmRollback = false;
+    }
   }
 
   function close() {
@@ -252,7 +285,7 @@
             {/if}
           {/if}
 
-          <!-- Restore button -->
+          <!-- Restore button (loads as draft) -->
           <button
             onclick={restore}
             class="mimsy-btn-primary w-full justify-center"
@@ -263,6 +296,26 @@
           <p class="text-[11px] text-stone-400 text-center mt-2 leading-relaxed">
             Loads content into the editor — not saved until you press Save.
           </p>
+
+          <!-- Rollback button (saves to disk immediately) -->
+          {#if !confirmRollback}
+            <button
+              onclick={() => { confirmRollback = true; }}
+              class="mimsy-btn-secondary w-full justify-center mt-2"
+              style="display:flex"
+            >
+              Rollback to this version
+            </button>
+          {:else}
+            <button
+              onclick={rollback}
+              disabled={rolling}
+              class="w-full justify-center mt-2 text-xs font-medium px-3 py-2 rounded-md text-white transition-colors"
+              style="display:flex; background: #dc2626;"
+            >
+              {rolling ? 'Rolling back...' : 'Confirm rollback — saves immediately'}
+            </button>
+          {/if}
         {/if}
       </div>
     {:else}

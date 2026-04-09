@@ -115,7 +115,7 @@ export interface ContentAdapter {
   listEntries(collection: string): Promise<ContentEntry[]>;
   getEntry(collection: string, slug: string): Promise<ContentEntry | null>;
   createEntry(collection: string, slug: string, frontmatter: Record<string, unknown>, body: string, format?: 'json' | 'markdown'): Promise<void>;
-  updateEntry(collection: string, slug: string, frontmatter: Record<string, unknown>, body: string): Promise<void>;
+  updateEntry(collection: string, slug: string, frontmatter: Record<string, unknown>, body: string, commitMessage?: string): Promise<void>;
   deleteEntry(collection: string, slug: string): Promise<void>;
 
   /** Write an asset file (image upload). Returns the public URL. */

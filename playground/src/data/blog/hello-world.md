@@ -6,8 +6,8 @@ tags:
   - welcome
   - first-post
 draft: false
-publishedAt: '2025-01-15T00:00:00.000Z'
-coverImage: https://images.unsplash.com/photo-1516116216624-53e697fedbea?w=600&q=80
+publishedAt: 2025-01-15T00:00:00.000Z
+coverImage: 'https://images.unsplash.com/photo-1516116216624-53e697fedbea?w=600&q=80'
 ---
 
 # Hello World

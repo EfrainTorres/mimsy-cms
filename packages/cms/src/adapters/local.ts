@@ -111,7 +111,8 @@ export class LocalContentAdapter implements ContentAdapter {
     collection: string,
     slug: string,
     frontmatter: Record<string, unknown>,
-    body: string
+    body: string,
+    _commitMessage?: string,
   ): Promise<void> {
     const dir = this.confined(this.contentDir, collection);
 

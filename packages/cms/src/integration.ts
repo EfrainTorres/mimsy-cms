@@ -93,6 +93,7 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
         injectRoute({ pattern: '/api/mimsy/page-text/[...path]', entrypoint: '@mimsy/cms/src/api/page-text/[...path].ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/history', entrypoint: '@mimsy/cms/src/api/history.ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/history/diff', entrypoint: '@mimsy/cms/src/api/history-diff.ts', prerender: false });
+        injectRoute({ pattern: '/api/mimsy/history/rollback', entrypoint: '@mimsy/cms/src/api/history-rollback.ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/media', entrypoint: '@mimsy/cms/src/api/media/index.ts', prerender: false });
         injectRoute({ pattern: '/api/mimsy/deploy', entrypoint: '@mimsy/cms/src/api/deploy.ts', prerender: false });
         injectRoute({ pattern: base + '/media', entrypoint: '@mimsy/cms/src/pages/admin/media.astro', prerender: false });
