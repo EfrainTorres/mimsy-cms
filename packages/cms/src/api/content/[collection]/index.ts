@@ -5,6 +5,9 @@ import { validateFrontmatter } from '../../../schema-validation.js';
 
 // Collection names must be simple identifiers — no path separators or traversal sequences.
 const VALID_COLLECTION = /^[a-zA-Z0-9_-]+$/;
+// Slugs: lowercase alphanumeric + hyphens, optionally nested with forward slashes.
+// Each segment must start and end with [a-z0-9]. Rejects "..", leading/trailing slashes.
+const VALID_SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*$/;
 
 /** GET /api/mimsy/content/[collection] — list entries (lightweight, no body) */
 export const GET: APIRoute = async ({ params, request, locals }) => {
@@ -44,6 +47,11 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
     return new Response(JSON.stringify({ error: 'Missing slug or frontmatter' }), { status: 400 });
   }
 
+  if (!VALID_SLUG.test(slug)) {
+    return new Response(JSON.stringify({ error: 'Invalid slug — lowercase letters, numbers, and hyphens only' }), { status: 400 });
+  }
+
+  let cleanedFrontmatter = frontmatter;
   const schema = validators[collection];
   if (schema) {
     const validation = await validateFrontmatter(schema, frontmatter);
@@ -53,6 +61,8 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
         fieldErrors: validation.fieldErrors,
       }), { status: 400 });
     }
+    // Use Zod-parsed data (defaults applied, unknown keys stripped)
+    cleanedFrontmatter = validation.data;
   }
 
   const adapter = await createAdapter(request, locals);
@@ -68,7 +78,7 @@ export const POST: APIRoute = async ({ params, request, locals }) => {
   }
 
   try {
-    await adapter.createEntry(collection, slug, frontmatter, content ?? '', isJson === true ? 'json' : undefined);
+    await adapter.createEntry(collection, slug, cleanedFrontmatter, content ?? '', isJson === true ? 'json' : undefined);
   } catch (err: any) {
     if (err?.status === 400) {
       return new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400 });

@@ -16,7 +16,11 @@ const { Content } = await render(post);
   <article class="max-w-3xl mx-auto px-6 py-16">
     <a href="/blog" class="text-sm text-violet-600 hover:text-violet-700 transition-colors">&larr; Back to blog</a>
 
-    <h1 class="mt-4 text-3xl sm:text-4xl font-semibold tracking-tight text-stone-900">
+    {post.data.coverImage && (
+      <img src={post.data.coverImage} alt={post.data.title} class="mt-6 w-full rounded-2xl shadow-lg" />
+    )}
+
+    <h1 class="mt-6 text-3xl sm:text-4xl font-semibold tracking-tight text-stone-900">
       {post.data.title}
     </h1>
 
@@ -25,6 +29,7 @@ const { Content } = await render(post);
     )}
 
     <div class="mt-4 flex items-center gap-3 text-sm text-stone-400">
+      {author?.data.avatar && <img src={author.data.avatar} alt={author.data.name} class="w-8 h-8 rounded-full" />}
       {author && <span class="text-stone-600 font-medium">{author.data.name}</span>}
       {post.data.publishedAt && (
         <>
@@ -52,9 +57,7 @@ const { Content } = await render(post);
 
     {author && (
       <div class="mt-12 p-5 bg-stone-100 rounded-xl flex items-start gap-4">
-        <div class="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-600 font-semibold text-sm shrink-0">
-          {author.data.name.charAt(0)}
-        </div>
+        {author.data.avatar && <img src={author.data.avatar} alt={author.data.name} class="w-12 h-12 rounded-full" />}
         <div>
           <p class="font-semibold text-stone-900">{author.data.name}</p>
           {author.data.bio && <p class="mt-1 text-sm text-stone-500">{author.data.bio}</p>}

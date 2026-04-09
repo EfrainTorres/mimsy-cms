@@ -4,15 +4,13 @@ import Base from '../../layouts/Base.astro';
 
 const posts = await getCollection('blog', ({ data }) => !data.draft);
 
-// Resolve author names
 const postsWithAuthors = await Promise.all(
   posts.map(async (post) => {
     const author = await getEntry(post.data.author);
-    return { ...post, authorName: author?.data.name ?? 'Unknown' };
+    return { ...post, author: author?.data };
   })
 );
 
-// Sort by date (newest first)
 postsWithAuthors.sort((a, b) => {
   const da = a.data.publishedAt?.getTime() ?? 0;
   const db = b.data.publishedAt?.getTime() ?? 0;
@@ -20,31 +18,37 @@ postsWithAuthors.sort((a, b) => {
 });
 ---
 
-<Base title="Blog">
-  <div class="max-w-3xl mx-auto px-6 py-16">
+<Base title="Blog" description="Thoughts, tutorials, and updates from the MimsyCMS team.">
+  <div class="max-w-4xl mx-auto px-6 py-16">
     <h1 class="text-3xl font-semibold tracking-tight text-stone-900">Blog</h1>
     <p class="mt-2 text-stone-500">Thoughts, tutorials, and updates.</p>
 
-    <div class="mt-10 space-y-8">
+    <div class="mt-10 grid sm:grid-cols-2 gap-8">
       {postsWithAuthors.map((post) => (
-        <article>
-          <a href={`/blog/${post.id}`} class="group block">
-            <h2 class="text-xl font-semibold text-stone-900 group-hover:text-violet-600 transition-colors">
+        <a href={`/blog/${post.id}`} class="group block bg-white border border-stone-200 rounded-xl overflow-hidden hover:shadow-lg transition-shadow">
+          {post.data.coverImage && (
+            <img src={post.data.coverImage} alt={post.data.title} class="w-full h-48 object-cover" />
+          )}
+          <div class="p-5">
+            <h2 class="text-lg font-semibold text-stone-900 group-hover:text-violet-600 transition-colors">
               {post.data.title}
             </h2>
             {post.data.description && (
-              <p class="mt-1 text-stone-500">{post.data.description}</p>
+              <p class="mt-1 text-sm text-stone-500 line-clamp-2">{post.data.description}</p>
             )}
-            <div class="mt-2 flex items-center gap-3 text-sm text-stone-400">
-              <span>{post.authorName}</span>
-              {post.data.publishedAt && (
-                <>
-                  <span>&middot;</span>
-                  <time datetime={post.data.publishedAt.toISOString()}>
-                    {post.data.publishedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
-                  </time>
-                </>
-              )}
+            <div class="mt-4 flex items-center gap-3">
+              {post.author?.avatar && <img src={post.author.avatar} alt={post.author.name} class="w-7 h-7 rounded-full" />}
+              <div class="text-xs text-stone-400">
+                {post.author && <span class="text-stone-600 font-medium">{post.author.name}</span>}
+                {post.data.publishedAt && (
+                  <span>
+                    {' '}&middot;{' '}
+                    <time datetime={post.data.publishedAt.toISOString()}>
+                      {post.data.publishedAt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+                    </time>
+                  </span>
+                )}
+              </div>
             </div>
             {post.data.tags.length > 0 && (
               <div class="mt-3 flex gap-2">
@@ -53,13 +57,13 @@ postsWithAuthors.sort((a, b) => {
                 ))}
               </div>
             )}
-          </a>
-        </article>
+          </div>
+        </a>
       ))}
-
-      {postsWithAuthors.length === 0 && (
-        <p class="text-stone-400">No posts yet.</p>
-      )}
     </div>
+
+    {postsWithAuthors.length === 0 && (
+      <p class="text-stone-400 mt-10">No posts yet.</p>
+    )}
   </div>
 </Base>

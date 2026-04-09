@@ -1,6 +1,6 @@
 import type { AstroIntegration } from 'astro';
 import type { MimsyConfig, ResolvedMimsyConfig } from './types.js';
-import { vitePluginMimsy } from './vite-plugin.js';
+import { vitePluginMimsy, vitePluginMimsyProbe } from './vite-plugin.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, URL as NodeURL } from 'node:url';
 
@@ -112,7 +112,7 @@ export function createMimsyIntegration(userConfig: MimsyConfig): AstroIntegratio
         // Register Vite plugin for virtual modules
         updateConfig({
           vite: {
-            plugins: [vitePluginMimsy(config, astroConfig)],
+            plugins: [vitePluginMimsy(config, astroConfig), vitePluginMimsyProbe()],
           },
         });
 

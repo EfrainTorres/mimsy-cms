@@ -14,9 +14,13 @@ const authors = await getCollection('authors');
     <div class="mt-6 grid sm:grid-cols-2 gap-4">
       {authors.map((author) => (
         <div class="bg-white border border-stone-200 rounded-xl p-5 flex items-start gap-4">
-          <div class="w-10 h-10 rounded-full bg-violet-100 flex items-center justify-center text-violet-600 font-semibold text-sm shrink-0">
-            {author.data.name.charAt(0)}
-          </div>
+          {author.data.avatar ? (
+            <img src={author.data.avatar} alt={author.data.name} class="w-12 h-12 rounded-full shrink-0" />
+          ) : (
+            <div class="w-12 h-12 rounded-full bg-violet-100 flex items-center justify-center text-violet-600 font-semibold text-sm shrink-0">
+              {author.data.name.charAt(0)}
+            </div>
+          )}
           <div>
             <p class="font-semibold text-stone-900">{author.data.name}</p>
             <p class="text-sm text-stone-400">{author.data.email}</p>

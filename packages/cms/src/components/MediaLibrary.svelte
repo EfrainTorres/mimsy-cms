@@ -16,6 +16,8 @@
   let pickerOpen = $state(false);
   let pickerCallback = $state(null);
   let pickerAlt = $state('');
+  let pickerShowAlt = $state(false);
+  let pickerDragOver = $state(false);
 
   // --- Shared state ---
   let objects = $state([]);
@@ -147,7 +149,11 @@
             uploaded: new Date().toISOString(),
           };
           objects = [newObj, ...objects];
-        } catch {}
+          // Auto-select in picker so user can immediately Insert
+          if (pickerOpen) pickerSelected = newObj;
+        } catch (e) {
+          console.error('[mimsy] Upload response parse error:', e);
+        }
         if (idx >= 0) {
           uploads[idx] = { ...uploads[idx], status: 'done', progress: 100 };
           uploads = [...uploads];
@@ -263,8 +269,10 @@
   // --- Picker event listener ---
   function onMediaOpen(e) {
     pickerCallback = e.detail?.callback ?? null;
+    pickerShowAlt = e.detail?.showAlt ?? false;
     pickerSelected = null;
     pickerAlt = '';
+    pickerDragOver = false;
     pickerOpen = true;
     if (objects.length === 0 && !loading) loadMedia(true);
   }
@@ -279,7 +287,33 @@
   function pickerCancel() {
     pickerOpen = false;
     pickerCallback = null;
+    pickerDragOver = false;
   }
+
+  // --- Picker drag & drop ---
+  function onPickerDragOver(e) {
+    e.preventDefault();
+    pickerDragOver = true;
+  }
+  function onPickerDragLeave(e) {
+    // Only reset if leaving the panel entirely
+    if (e.currentTarget && !e.currentTarget.contains(e.relatedTarget)) pickerDragOver = false;
+  }
+  function onPickerDrop(e) {
+    e.preventDefault();
+    pickerDragOver = false;
+    uploadFiles(e.dataTransfer.files);
+  }
+
+  // --- Escape to close picker ---
+  $effect(() => {
+    if (!pickerOpen) return;
+    function onKeydown(e) {
+      if (e.key === 'Escape') { pickerCancel(); e.preventDefault(); }
+    }
+    document.addEventListener('keydown', onKeydown);
+    return () => document.removeEventListener('keydown', onKeydown);
+  });
 
   onMount(() => {
     if (mode === 'library') {
@@ -304,29 +338,92 @@
   });
 </script>
 
+<!-- ─── Shared SVG snippets ─── -->
+{#snippet iconUpload(size = 'w-4 h-4')}
+  <svg class={size} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+{/snippet}
+{#snippet iconClose(size = 'w-4 h-4')}
+  <svg class={size} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12" /></svg>
+{/snippet}
+{#snippet iconCheck(size = 'w-4 h-4', weight = '2')}
+  <svg class={size} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width={weight} d="m4.5 12.75 6 6 9-13.5" /></svg>
+{/snippet}
+{#snippet iconSearch(size = 'w-3.5 h-3.5')}
+  <svg class={size} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+{/snippet}
+{#snippet iconImage(size = 'w-10 h-10')}
+  <svg class={size} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+{/snippet}
+
+{#snippet uploadProgress()}
+  {#if uploads.length > 0}
+    <div class="mimsy-upload-progress">
+      {#each uploads as u}
+        <div class="flex items-center gap-3 text-sm">
+          <span class="flex-1 truncate text-stone-600 text-xs font-mono">{u.name}</span>
+          {#if u.status === 'done'}
+            {@render iconCheck('w-4 h-4 text-emerald-500 shrink-0')}
+          {:else if u.status === 'error'}
+            <span class="text-red-500 text-xs shrink-0">{u.error}</span>
+          {:else if u.status === 'queued'}
+            <span class="text-stone-400 text-xs shrink-0">Queued</span>
+          {:else}
+            <div class="flex items-center gap-2 flex-1">
+              <div class="mimsy-progress-track flex-1">
+                <div class="mimsy-progress-fill" style="width:{u.progress}%"></div>
+              </div>
+              <span class="text-xs text-stone-500 tabular-nums w-8 text-right shrink-0">{u.progress}%</span>
+              <button onclick={() => cancelUpload(u.id)} class="mimsy-btn-cancel-upload" title="Cancel">
+                {@render iconClose('w-3.5 h-3.5')}
+              </button>
+            </div>
+          {/if}
+        </div>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
+
 <!-- ─── PICKER MODE ─── -->
 {#if pickerOpen && mode === 'picker'}
   <div class="mimsy-picker-overlay" role="dialog" aria-modal="true" aria-label="Insert Image">
-    <div class="mimsy-picker-panel">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div
+      class="mimsy-picker-panel"
+      ondragover={onPickerDragOver}
+      ondragleave={onPickerDragLeave}
+      ondrop={onPickerDrop}
+    >
+      {#if pickerDragOver}
+        <div class="mimsy-picker-drop-hint">Drop images to upload</div>
+      {/if}
+
       <!-- Header -->
       <div class="flex items-center justify-between px-4 py-3 border-b border-stone-200">
         <span class="text-sm font-semibold text-stone-700">Insert Image</span>
         <button onclick={pickerCancel} class="mimsy-toast-close" title="Close">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12" /></svg>
+          {@render iconClose()}
         </button>
       </div>
 
       <!-- Toolbar -->
       <div class="flex items-center gap-3 px-4 py-2.5 border-b border-stone-100 bg-stone-50/50">
         <button onclick={triggerFileInput} class="mimsy-btn-secondary text-xs">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+          {@render iconUpload('w-3.5 h-3.5')}
           Upload
         </button>
         <div class="mimsy-search-wrapper flex-1">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+          {@render iconSearch()}
           <input bind:value={search} type="text" placeholder="Search…" class="mimsy-input text-sm" />
         </div>
       </div>
+
+      <!-- Upload progress -->
+      {#if uploads.length > 0}
+        <div class="px-4 py-2 border-b border-stone-100 bg-stone-50/50">
+          {@render uploadProgress()}
+        </div>
+      {/if}
 
       <!-- Grid -->
       <div class="mimsy-picker-grid">
@@ -335,7 +432,7 @@
         {:else if unavailable}
           <div class="col-span-4 text-center py-8 text-sm text-stone-400">Configure R2 to browse media library</div>
         {:else if filtered.length === 0 && !loading}
-          <div class="col-span-4 text-center py-8 text-sm text-stone-400">No images yet. Upload one above.</div>
+          <div class="col-span-4 text-center py-8 text-sm text-stone-400">No images yet. Upload or drop one above.</div>
         {:else}
           {#each filtered as obj}
             <button
@@ -348,7 +445,7 @@
               <img src={obj.url} alt={obj.filename} loading="lazy" />
               {#if pickerSelected?.key === obj.key}
                 <span class="mimsy-thumb-check">
-                  <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="m4.5 12.75 6 6 9-13.5" /></svg>
+                  {@render iconCheck('w-3.5 h-3.5', '2.5')}
                 </span>
               {/if}
             </button>
@@ -356,8 +453,8 @@
         {/if}
       </div>
 
-      <!-- Alt text + actions -->
-      {#if pickerSelected}
+      <!-- Alt text (only when caller needs it, e.g. Tiptap image insertion) -->
+      {#if pickerSelected && pickerShowAlt}
         <div class="px-4 py-3 border-t border-stone-100 bg-stone-50/50 space-y-3">
           <div>
             <label class="mimsy-label" for="picker-alt">Alt text</label>
@@ -386,40 +483,19 @@
       <!-- Toolbar -->
       <div class="mimsy-card p-4 flex flex-wrap items-center gap-3">
         <button onclick={triggerFileInput} class="mimsy-btn-primary text-sm">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5m-13.5-9L12 3m0 0 4.5 4.5M12 3v13.5" /></svg>
+          {@render iconUpload()}
           Upload
         </button>
         <div class="mimsy-search-wrapper flex-1 min-w-[160px]">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z" /></svg>
+          {@render iconSearch()}
           <input bind:value={search} type="text" placeholder="Search…" class="mimsy-input" />
         </div>
       </div>
 
       <!-- Upload progress -->
       {#if uploads.length > 0}
-        <div class="mimsy-card p-4 space-y-2">
-          {#each uploads as u}
-            <div class="flex items-center gap-3 text-sm">
-              <span class="flex-1 truncate text-stone-600 text-xs font-mono">{u.name}</span>
-              {#if u.status === 'done'}
-                <svg class="w-4 h-4 text-emerald-500 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m4.5 12.75 6 6 9-13.5" /></svg>
-              {:else if u.status === 'error'}
-                <span class="text-red-500 text-xs shrink-0">{u.error}</span>
-              {:else if u.status === 'queued'}
-                <span class="text-stone-400 text-xs shrink-0">Queued</span>
-              {:else}
-                <div class="flex items-center gap-2 flex-1">
-                  <div class="mimsy-progress-track flex-1">
-                    <div class="mimsy-progress-fill" style="width:{u.progress}%"></div>
-                  </div>
-                  <span class="text-xs text-stone-500 tabular-nums w-8 text-right shrink-0">{u.progress}%</span>
-                  <button onclick={() => cancelUpload(u.id)} class="text-stone-400 hover:text-red-500 shrink-0" title="Cancel" style="border:none;background:none;cursor:pointer;padding:0;">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18 18 6M6 6l12 12" /></svg>
-                  </button>
-                </div>
-              {/if}
-            </div>
-          {/each}
+        <div class="mimsy-card p-4">
+          {@render uploadProgress()}
         </div>
       {/if}
 
@@ -438,7 +514,7 @@
       <!-- Empty state -->
       {:else if filtered.length === 0 && uploads.length === 0 && !loading}
         <div class="mimsy-card border-2 border-dashed border-stone-200 p-16 text-center">
-          <svg class="w-10 h-10 text-stone-300 mx-auto mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+          <div class="text-stone-300 mx-auto mb-3 w-fit">{@render iconImage()}</div>
           <p class="text-stone-500 text-sm font-medium">Drop images here or click Upload</p>
           <p class="text-stone-400 text-xs mt-1">PNG, JPG, GIF, WebP, AVIF</p>
           <button onclick={triggerFileInput} class="mimsy-btn-secondary text-sm mt-4">Choose files</button>
@@ -518,6 +594,7 @@
     padding: 1rem;
   }
   .mimsy-picker-panel {
+    position: relative;
     background: #fff;
     border-radius: 0.75rem;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.18);
@@ -538,6 +615,21 @@
     min-height: 200px;
     max-height: 340px;
   }
+  .mimsy-picker-drop-hint {
+    position: absolute;
+    inset: 0;
+    z-index: 1;
+    background: rgba(124, 58, 237, 0.08);
+    border: 3px dashed var(--mimsy-accent, #7c3aed);
+    border-radius: 0.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--mimsy-accent, #7c3aed);
+    pointer-events: none;
+  }
 
   /* ── Library grid ── */
   .mimsy-library-grid {
@@ -550,7 +642,7 @@
   .mimsy-thumb {
     position: relative;
     aspect-ratio: 1;
-    border-radius: 0.5rem;
+    border-radius: var(--mimsy-radius, 0.5rem);
     overflow: hidden;
     border: 2px solid transparent;
     cursor: pointer;
@@ -568,7 +660,7 @@
     border-color: #a78bfa;
   }
   .mimsy-thumb.selected {
-    border-color: #7c3aed;
+    border-color: var(--mimsy-accent, #7c3aed);
   }
   .mimsy-thumb-check {
     position: absolute;
@@ -576,7 +668,7 @@
     right: 4px;
     width: 20px;
     height: 20px;
-    background: #7c3aed;
+    background: var(--mimsy-accent, #7c3aed);
     border-radius: 50%;
     display: flex;
     align-items: center;
@@ -584,23 +676,28 @@
     color: #fff;
   }
 
-  /* ── Drag overlay ── */
+  /* ── Drag overlay (library full-page) ── */
   .mimsy-drag-overlay {
     position: fixed;
     inset: 0;
     z-index: 9996;
     background: rgba(124, 58, 237, 0.12);
-    border: 3px dashed #7c3aed;
+    border: 3px dashed var(--mimsy-accent, #7c3aed);
     display: flex;
     align-items: center;
     justify-content: center;
     font-size: 1.25rem;
     font-weight: 600;
-    color: #7c3aed;
+    color: var(--mimsy-accent, #7c3aed);
     pointer-events: none;
   }
 
-  /* ── Progress bar ── */
+  /* ── Upload progress ── */
+  .mimsy-upload-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
   .mimsy-progress-track {
     height: 4px;
     border-radius: 2px;
@@ -609,8 +706,22 @@
   }
   .mimsy-progress-fill {
     height: 100%;
-    background: #7c3aed;
+    background: var(--mimsy-accent, #7c3aed);
     border-radius: 2px;
     transition: width 100ms linear;
+  }
+  .mimsy-btn-cancel-upload {
+    display: inline-flex;
+    align-items: center;
+    border: none;
+    background: none;
+    cursor: pointer;
+    padding: 0;
+    color: #a8a29e;
+    flex-shrink: 0;
+    transition: color 150ms ease;
+  }
+  .mimsy-btn-cancel-upload:hover {
+    color: #ef4444;
   }
 </style>

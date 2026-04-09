@@ -1,0 +1,155 @@
+---
+/**
+ * Case study detail page — probe stress-test.
+ *
+ * Exercises every pattern that breaks heuristic matching:
+ * - One-to-many: title in <h1>, <title>, <meta og:title>, JSON-LD
+ * - Component indirection: MetricCard, ClientLogo receive props
+ * - Formatted dates: toLocaleDateString()
+ * - Primitive string arrays: tags as badges
+ * - Nested objects: client.name, client.logo, client.industry
+ * - Repeated short strings: "Learn More" x3 in related links
+ * - CSS text-transform: uppercase section heading
+ * - Image attributes: coverImage in <img src>, client.logo through component
+ * - client:visible island: TestimonialCard hydrates late
+ * - Reference resolution: author name from reference ID
+ */
+import { getCollection, getEntry, render } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+import MetricCard from '../../components/MetricCard.astro';
+import ClientLogo from '../../components/ClientLogo.astro';
+import TestimonialCard from '../../components/TestimonialCard.svelte';
+
+const { slug } = Astro.params;
+if (!slug) return Astro.redirect('/');
+
+const entry = await getEntry('case-studies', slug);
+if (!entry) return new Response(null, { status: 404 });
+
+const { data } = entry;
+const { Content } = await render(entry);
+
+// Reference resolution: resolve author
+const author = await getEntry(data.author);
+
+// Formatted date
+const formattedDate = data.publishedAt.toLocaleDateString('en-US', {
+  year: 'numeric', month: 'long', day: 'numeric',
+});
+---
+<Base title={data.metaTitle || data.title} description={data.metaDescription || data.description}>
+  {/* --- One-to-many: title renders in <head> via Base layout (title prop) --- */}
+  {/* --- One-to-many: og:title + og:image + og:description in <head> --- */}
+  <Fragment slot="head">
+    <meta property="og:title" content={data.title} />
+    {data.description && <meta property="og:description" content={data.description} />}
+    <meta property="og:image" content={data.coverImage} />
+  </Fragment>
+
+  <article class="max-w-4xl mx-auto px-6 py-12">
+    {/* --- One-to-many: JSON-LD with title, description, image, date --- */}
+    <script type="application/ld+json" set:html={JSON.stringify({
+      "@context": "https://schema.org",
+      "@type": "Article",
+      "headline": data.title,
+      "description": data.description,
+      "image": data.coverImage,
+      "datePublished": data.publishedAt.toISOString(),
+      "author": author ? { "@type": "Person", "name": author.data.name } : undefined,
+    })} />
+
+    {/* --- Image attribute: coverImage as hero --- */}
+    <img
+      src={data.coverImage}
+      alt={data.title}
+      class="w-full h-64 object-cover rounded-xl mb-8"
+    />
+
+    {/* --- One-to-many: title in <h1> (also in <title>, og:title, JSON-LD above) --- */}
+    <h1 class="text-4xl font-bold text-stone-900 mb-4">{data.title}</h1>
+
+    {/* --- Description --- */}
+    {data.description && (
+      <p class="text-lg text-stone-600 mb-6">{data.description}</p>
+    )}
+
+    {/* --- Formatted date + reference resolution --- */}
+    <div class="flex items-center gap-4 text-sm text-stone-500 mb-8">
+      {author && (
+        <div class="flex items-center gap-2">
+          {author.data.avatar && (
+            <img src={author.data.avatar} alt={author.data.name} class="w-6 h-6 rounded-full" />
+          )}
+          <span>{author.data.name}</span>
+        </div>
+      )}
+      <span>&middot;</span>
+      <time datetime={data.publishedAt.toISOString()}>{formattedDate}</time>
+    </div>
+
+    {/* --- Primitive string array: tags as badges --- */}
+    {data.tags.length > 0 && (
+      <div class="flex flex-wrap gap-2 mb-8">
+        {data.tags.map((tag: string) => (
+          <span class="px-3 py-1 bg-blue-50 text-blue-700 text-xs font-medium rounded-full">{tag}</span>
+        ))}
+      </div>
+    )}
+
+    {/* --- Component indirection: nested object through ClientLogo props --- */}
+    <div class="mb-10 p-6 bg-white border border-stone-200 rounded-xl">
+      {/* --- CSS text-transform: uppercase heading --- */}
+      <h2 class="text-xs font-bold uppercase tracking-widest text-stone-400 mb-4">Client</h2>
+      <ClientLogo
+        name={data.client.name}
+        logo={data.client.logo}
+        industry={data.client.industry}
+        url={data.client.url}
+      />
+    </div>
+
+    {/* --- Component indirection: metrics through MetricCard props --- */}
+    {data.metrics.length > 0 && (
+      <section class="mb-10">
+        <h2 class="text-xs font-bold uppercase tracking-widest text-stone-400 mb-4">Results</h2>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {data.metrics.map((m: { label: string; value: string }) => (
+            <MetricCard label={m.label} value={m.value} />
+          ))}
+        </div>
+      </section>
+    )}
+
+    {/* --- client:visible Svelte island: testimonial hydrates late --- */}
+    {data.testimonialQuote && (
+      <section class="mb-10">
+        <h2 class="text-xs font-bold uppercase tracking-widest text-stone-400 mb-4">What They Said</h2>
+        <TestimonialCard
+          client:visible
+          quote={data.testimonialQuote}
+          author={data.testimonialAuthor || ''}
+        />
+      </section>
+    )}
+
+    {/* --- Markdown body content --- */}
+    <div class="prose prose-stone max-w-none mb-10">
+      <Content />
+    </div>
+
+    {/* --- Repeated short strings: "Learn More" x3 across cards --- */}
+    {data.relatedLinks.length > 0 && (
+      <section class="border-t border-stone-200 pt-8">
+        <h2 class="text-xs font-bold uppercase tracking-widest text-stone-400 mb-4">Related</h2>
+        <div class="grid md:grid-cols-3 gap-4">
+          {data.relatedLinks.map((link: { title: string; url: string; buttonText: string }) => (
+            <div class="p-5 bg-white border border-stone-200 rounded-lg">
+              <h3 class="font-semibold text-stone-900 mb-2">{link.title}</h3>
+              <a href={link.url} class="text-sm text-blue-600 hover:text-blue-700 font-medium">{link.buttonText}</a>
+            </div>
+          ))}
+        </div>
+      </section>
+    )}
+  </article>
+</Base>

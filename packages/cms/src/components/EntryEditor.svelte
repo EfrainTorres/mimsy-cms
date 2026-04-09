@@ -7,7 +7,7 @@
   import HistoryDrawer from './HistoryDrawer.svelte';
   import { formatLabel } from '../utils/format-label.js';
   import { toast } from '../utils/toast.js';
-  import { buildCandidates } from '../overlay/build-candidates.js';
+  import { buildCandidates, generateProbes } from '../overlay/build-candidates.js';
   import { djb2Hash, setNestedValue, getNestedValue, focusFieldInEditor } from '../overlay/bridge.js';
 
   /**
@@ -80,6 +80,8 @@
   function scheduleAutosave() {
     if (autosaveTimer) clearTimeout(autosaveTimer);
     if (saveState === 'saving') { pendingDirty = true; return; }
+    // Don't autosave while probing — a save triggers full-reload which resets state
+    if (probeState === 'probing') { pendingDirty = true; return; }
     saveState = 'dirty';
     autosaveTimer = setTimeout(() => save(false), 1500);
   }
@@ -155,6 +157,11 @@
 
   async function save(manual = true) {
     if (autosaveTimer) clearTimeout(autosaveTimer);
+    // Block saves while probing — a save triggers Astro's full-reload broadcast
+    if (probeState === 'probing') {
+      pendingDirty = true;
+      return false;
+    }
     if (saveController) saveController.abort();
     saveController = new AbortController();
     const { signal } = saveController;
@@ -286,16 +293,93 @@
     localStorage.setItem('mimsy-visual-edit', visualEditEnabled ? 'on' : 'off');
   }
 
-  function sendInitToOverlay() {
+  // --- Mutation Probing State Machine ---
+  // States: 'idle' | 'probing' | 'mapped' | 'failed'
+  // Probes inject sentinels via Vite plugin (no file writes, no HMR broadcast).
+  const probeCacheKey = `mimsy-probe-v2-${collection}/${slug}`;
+  let probeState = 'idle';
+  let cachedProbeMapping = null;  // Cached { fieldPath: [{ path, attribute }] }
+  let probeMap = null;            // Current { probeId: fieldPath } for in-flight probe
+  let probeTimeout = null;
+
+  // Restore cached probe mapping from sessionStorage (survives page reloads)
+  if (typeof sessionStorage !== 'undefined') {
+    try {
+      const cached = sessionStorage.getItem(probeCacheKey);
+      if (cached) {
+        cachedProbeMapping = JSON.parse(cached);
+        probeState = 'mapped';
+      }
+    } catch { /* ignore corrupt cache */ }
+  }
+
+  function sendInitToOverlay(probeMapping) {
     const iframe = document.getElementById('mimsy-preview-frame');
     if (!iframe?.contentWindow) return;
-    const candidates = buildCandidates(JSON.parse(JSON.stringify(frontmatter)), schemaFields);
+    const cands = buildCandidates(JSON.parse(JSON.stringify(frontmatter)), schemaFields);
     iframe.contentWindow.postMessage({
       type: 'mimsy:init',
-      candidates,
+      candidates: cands,
       contentHash: djb2Hash(JSON.stringify(frontmatter)),
+      probeMapping: probeMapping || null,
       mode: 'collection',
     }, location.origin);
+  }
+
+  async function startProbe() {
+    if (probeState === 'probing') return;
+
+    const fmCopy = JSON.parse(JSON.stringify(frontmatter));
+    const result = generateProbes(fmCopy, schemaFields);
+    probeMap = result.probeMap;
+
+    // Activate probe on the Vite dev server — no file writes, no HMR
+    try {
+      const res = await fetch('/__mimsy_probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'start',
+          collection,
+          slug,
+          probeMap: result.probeMap,
+        }),
+      });
+      if (!res.ok) {
+        probeState = 'failed';
+        return;
+      }
+    } catch {
+      probeState = 'failed';
+      return;
+    }
+
+    probeState = 'probing';
+    // Reload only the preview iframe — admin panel stays mounted
+    const iframe = document.getElementById('mimsy-preview-frame');
+    if (iframe) iframe.src = iframe.src;
+    // Safety timeout: if overlay doesn't respond within 5s, deactivate and fall back
+    probeTimeout = setTimeout(() => stopProbe(true), 5000);
+  }
+
+  async function stopProbe(timedOut = false) {
+    if (probeTimeout) { clearTimeout(probeTimeout); probeTimeout = null; }
+    // Deactivate probe on the Vite dev server
+    try {
+      await fetch('/__mimsy_probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      });
+    } catch { /* server auto-clears after 30s */ }
+
+    probeState = timedOut ? 'failed' : 'mapped';
+
+    if (!timedOut) {
+      // Reload iframe to render clean data with deterministic mapping applied
+      const iframe = document.getElementById('mimsy-preview-frame');
+      if (iframe) iframe.src = iframe.src;
+    }
   }
 
   function handleOverlayMessage(e) {
@@ -305,8 +389,47 @@
     if (!d || !d.type) return;
 
     if (d.type === 'mimsy:ready') {
-      sendInitToOverlay();
+      if (probeState === 'probing') {
+        // Iframe rendered with probe sentinels — ask overlay to scan
+        iframe.contentWindow.postMessage({
+          type: 'mimsy:probe',
+          probeMap: probeMap,
+        }, location.origin);
+      } else if (probeState === 'mapped') {
+        // Send cached deterministic mapping
+        sendInitToOverlay(cachedProbeMapping);
+      } else {
+        // 'idle' or 'failed' — heuristic matching first
+        sendInitToOverlay(null);
+      }
     }
+
+    if (d.type === 'mimsy:mapped') {
+      // Upgrade from heuristics to probing (one-shot: only triggers from 'idle')
+      if (probeState === 'idle') {
+        startProbe();
+      }
+    }
+
+    if (d.type === 'mimsy:probe-mapped') {
+      // Overlay found probe sentinels and reported element paths
+      if (probeTimeout) { clearTimeout(probeTimeout); probeTimeout = null; }
+      cachedProbeMapping = d.mapping;
+      probeMap = null;
+      // Persist to sessionStorage — survives page reloads from manual saves
+      try { sessionStorage.setItem(probeCacheKey, JSON.stringify(cachedProbeMapping)); } catch {}
+      // Deactivate probe and reload with clean data + mapping
+      stopProbe(false);
+    }
+
+    if (d.type === 'mimsy:probe-stale') {
+      // Cached probe mapping was stale — clear it and re-probe
+      cachedProbeMapping = null;
+      try { sessionStorage.removeItem(probeCacheKey); } catch {}
+      probeState = 'idle';
+      startProbe();
+    }
+
     if (d.type === 'mimsy:focus') {
       previewOpen = false;
       requestAnimationFrame(() => focusFieldInEditor(d.fieldPath));
@@ -334,13 +457,33 @@
     }
   }
 
+  // Clean up probe state on page unload or component unmount
+  function handleBeforeUnload() {
+    if (probeState === 'probing') {
+      navigator.sendBeacon('/__mimsy_probe', new Blob(
+        [JSON.stringify({ action: 'stop' })],
+        { type: 'application/json' },
+      ));
+    }
+  }
+
   if (typeof window !== 'undefined') {
     window.addEventListener('message', handleOverlayMessage);
+    window.addEventListener('beforeunload', handleBeforeUnload);
   }
 
   onDestroy(() => {
     if (typeof window !== 'undefined') {
       window.removeEventListener('message', handleOverlayMessage);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    }
+    if (probeTimeout) clearTimeout(probeTimeout);
+    if (probeState === 'probing') {
+      fetch('/__mimsy_probe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop' }),
+      }).catch(() => {});
     }
   });
 

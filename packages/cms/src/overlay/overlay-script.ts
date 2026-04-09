@@ -1,7 +1,7 @@
 /**
  * Overlay IIFE — injected into the preview iframe via middleware.
- * Gate 1: matching engine + hover highlight + click-to-focus.
- * Gate 2: inline string editing via double-click.
+ * Matching engine + hover highlight + click-to-select + click-again-to-edit.
+ * Ctrl/Cmd+click jumps to the form field in the editor panel.
  *
  * Exported as a string constant so middleware can inline it into HTML.
  */
@@ -17,8 +17,10 @@ export const OVERLAY_SCRIPT = `(function(){
   var candidates = null;
   var cacheHash = '';
   var editing = null;         // Element currently being inline-edited
-  var blockRegions = null;    // Map<arrayPath, [{ index, region }]>
+  var selected = null;        // { element, match } — currently selected (click-to-select)
+  var arrayRegions = null;    // Map<arrayPath, [{ index, region }]> — computed by co-occurrence matching
   var dragHandles = [];       // cleanup references
+  var storedProbeMapping = null; // Durable probe mapping — survives DOM churn
 
   // --- Overlay DOM ---
   var highlight = document.createElement('div');
@@ -92,13 +94,26 @@ export const OVERLAY_SCRIPT = `(function(){
     return ts * 0.35 + gs * 0.15 + us * 0.20 + ls * 0.15 + ss * 0.15;
   }
 
+  function scoreAttrMatch(val, attr) {
+    if (!val || !attr) return 0;
+    if (attr === val) return 0.95;
+    var a = attr.split('?')[0].split('#')[0];
+    var v = val.split('?')[0].split('#')[0];
+    if (a.substring(0, 2) === './') a = a.substring(1);
+    if (v.substring(0, 2) === './') v = v.substring(1);
+    if (a === v) return 0.9;
+    if (a.length > v.length && a.substring(a.length - v.length) === v && (v.charAt(0) === '/' || a.charAt(a.length - v.length - 1) === '/')) return 0.8;
+    if (v.length > a.length && v.substring(v.length - a.length) === a && (a.charAt(0) === '/' || v.charAt(v.length - a.length - 1) === '/')) return 0.8;
+    return 0;
+  }
+
   function collectTextElements() {
     var SKIP = { SCRIPT:1, STYLE:1, NOSCRIPT:1, SVG:1, HEAD:1, META:1, LINK:1 };
     var els = [];
     var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
       acceptNode: function(node) {
         if (SKIP[node.tagName]) return NodeFilter.FILTER_REJECT;
-        if (node.hasAttribute('data-mimsy-highlight') || node.hasAttribute('data-mimsy-tooltip') || node.hasAttribute('data-mimsy-drag')) return NodeFilter.FILTER_REJECT;
+        if (node.hasAttribute('data-mimsy-highlight') || node.hasAttribute('data-mimsy-tooltip') || node.hasAttribute('data-mimsy-drag') || node.hasAttribute('data-mimsy-grip')) return NodeFilter.FILTER_REJECT;
         var t = node.textContent;
         if (!t || !t.trim()) return NodeFilter.FILTER_SKIP;
         if (node.children.length <= 5) return NodeFilter.FILTER_ACCEPT;
@@ -109,46 +124,260 @@ export const OVERLAY_SCRIPT = `(function(){
     return els;
   }
 
+  function collectAttrElements() {
+    var els = [];
+    var imgs = document.body.querySelectorAll('img[src]');
+    for (var i = 0; i < imgs.length; i++) els.push({ element: imgs[i], value: imgs[i].getAttribute('src') });
+    var links = document.body.querySelectorAll('a[href]');
+    for (var i = 0; i < links.length; i++) {
+      var h = links[i].getAttribute('href');
+      if (h && h !== '#' && h.indexOf('javascript:') !== 0 && h.indexOf('mailto:') !== 0) {
+        els.push({ element: links[i], value: h });
+      }
+    }
+    var media = document.body.querySelectorAll('video[src], video[poster], source[src]');
+    for (var i = 0; i < media.length; i++) {
+      if (media[i].getAttribute('src')) els.push({ element: media[i], value: media[i].getAttribute('src') });
+      if (media[i].getAttribute('poster')) els.push({ element: media[i], value: media[i].getAttribute('poster') });
+    }
+    var styled = document.body.querySelectorAll('[style*="url("]');
+    for (var i = 0; i < styled.length; i++) {
+      var bg = styled[i].style.backgroundImage;
+      if (bg && bg.indexOf('url(') !== -1) {
+        var url = bg.slice(bg.indexOf('url(') + 4, bg.lastIndexOf(')'));
+        if (url.charAt(0) === '"' || url.charAt(0) === "'") url = url.substring(1, url.length - 1);
+        if (url) els.push({ element: styled[i], value: url });
+      }
+    }
+    return els;
+  }
+
+  // --- Co-occurrence helpers ---
+  function findArrayRegions(anchors) {
+    if (anchors.length < 2) return null;
+    // Find lowest common ancestor of all anchor elements
+    var lca = anchors[0].element;
+    for (var i = 1; i < anchors.length; i++) {
+      lca = commonParent(lca, anchors[i].element);
+    }
+    // Walk each anchor up to the direct child of LCA
+    var regionMap = {};
+    var seen = [];
+    for (var i = 0; i < anchors.length; i++) {
+      var el = anchors[i].element;
+      while (el.parentElement && el.parentElement !== lca) {
+        el = el.parentElement;
+      }
+      if (el === lca || !el.parentElement) return null;
+      // Regions must be distinct elements
+      if (seen.indexOf(el) !== -1) return null;
+      seen.push(el);
+      regionMap[anchors[i].index] = el;
+    }
+    if (!validateSiblingPattern(seen)) return null;
+    return regionMap;
+  }
+
+  function validateSiblingPattern(els) {
+    if (els.length < 2) return false;
+    // All elements share same parent (direct children of LCA).
+    // Check adjacency: regions must be clustered, not scattered across the page.
+    // Allows at most 1 non-region sibling between consecutive regions (handles <hr> separators).
+    var parent = els[0].parentElement;
+    if (!parent) return false;
+    var children = parent.children;
+    var indices = [];
+    for (var i = 0; i < els.length; i++) {
+      for (var j = 0; j < children.length; j++) {
+        if (children[j] === els[i]) { indices.push(j); break; }
+      }
+    }
+    if (indices.length !== els.length) return false;
+    indices.sort(function(a, b) { return a - b; });
+    for (var i = 1; i < indices.length; i++) {
+      if (indices[i] - indices[i - 1] > 2) return false;
+    }
+    return true;
+  }
+
+  // --- Matching (co-occurrence: anchor-first, region-constrained) ---
   function runMatching(cands) {
     var textEls = collectTextElements();
+    var attrEls = collectAttrElements();
 
-    // Count occurrences
+    // Count occurrences (text candidates only)
     var occ = {};
     for (var i = 0; i < textEls.length; i++) {
       var t = textEls[i].textContent.trim();
       for (var j = 0; j < cands.length; j++) {
+        if (cands[j].matchMode === 'attribute') continue;
         if (t === cands[j].value || normalize(t) === normalize(cands[j].value)) {
           occ[cands[j].value] = (occ[cands[j].value] || 0) + 1;
         }
       }
     }
 
-    // Score and map
     var m = new Map();
     var f2e = new Map();
+    var regions = new Map();
 
-    for (var ci = 0; ci < cands.length; ci++) {
-      var c = cands[ci];
-      var best = null;
-      var bestS = 0;
-      var o = occ[c.value] || 0;
-
-      for (var ei = 0; ei < textEls.length; ei++) {
-        var s = scoreMatch(c, textEls[ei], o);
-        if (s > bestS) { bestS = s; best = textEls[ei]; }
+    function best(c, els) {
+      var top = null, topS = 0, o = occ[c.value] || 0;
+      for (var i = 0; i < els.length; i++) {
+        var s = scoreMatch(c, els[i], o);
+        if (s > topS) { topS = s; top = els[i]; }
       }
+      return top && topS >= MED ? { element: top, score: topS } : null;
+    }
 
-      if (best && bestS >= MED) {
-        var ex = m.get(best);
-        if (!ex || bestS > ex.confidence) {
-          if (ex) f2e.delete(ex.fieldPath);
-          m.set(best, { fieldPath: c.fieldPath, confidence: bestS, candidate: c });
-          f2e.set(c.fieldPath, { element: best, confidence: bestS });
+    function findBest(c, tEls, aEls) {
+      if (c.matchMode === 'attribute') {
+        var top = null, topS = 0;
+        for (var i = 0; i < aEls.length; i++) {
+          var s = scoreAttrMatch(c.value, aEls[i].value);
+          if (s > topS) { topS = s; top = aEls[i].element; }
+        }
+        return top && topS >= MED ? { element: top, score: topS } : null;
+      }
+      return best(c, tEls);
+    }
+
+    function commit(c, el, score) {
+      var ef = f2e.get(c.fieldPath);
+      if (!ef || ef.confidence < score) {
+        f2e.set(c.fieldPath, { element: el, confidence: score });
+      }
+      var ex = m.get(el);
+      var isAttr = c.matchMode === 'attribute';
+      if (!ex) {
+        m.set(el, { fieldPath: c.fieldPath, confidence: score, candidate: c });
+      } else if (!isAttr) {
+        if (ex.candidate.matchMode === 'attribute' || score > ex.confidence) {
+          if (ex.candidate.matchMode !== 'attribute') f2e.delete(ex.fieldPath);
+          m.set(el, { fieldPath: c.fieldPath, confidence: score, candidate: c });
         }
       }
     }
 
-    return { mappings: m, fieldToElement: f2e };
+    function matchGlobal(list) {
+      for (var i = 0; i < list.length; i++) {
+        var r = findBest(list[i], textEls, attrEls);
+        if (r) commit(list[i], r.element, r.score);
+      }
+    }
+
+    // Separate array items from standalone candidates
+    var byArray = {};
+    var standalone = [];
+    for (var i = 0; i < cands.length; i++) {
+      var c = cands[i];
+      if (c.arrayField !== undefined && c.arrayIndex !== undefined) {
+        if (!byArray[c.arrayField]) byArray[c.arrayField] = {};
+        if (!byArray[c.arrayField][c.arrayIndex]) byArray[c.arrayField][c.arrayIndex] = [];
+        byArray[c.arrayField][c.arrayIndex].push(c);
+      } else {
+        standalone.push(c);
+      }
+    }
+
+    // Phase 1: Standalone candidates — match globally (same as before)
+    matchGlobal(standalone);
+
+    // Phase 2: Array items — anchor-first, region-constrained
+    for (var af in byArray) {
+      var group = byArray[af];
+      var indices = Object.keys(group);
+      var anchors = [];
+
+      // Count attribute value occurrences across this array — only unique values can anchor
+      var attrValueCounts = {};
+      for (var ii = 0; ii < indices.length; ii++) {
+        var idx = parseInt(indices[ii]);
+        for (var ci = 0; ci < group[idx].length; ci++) {
+          if (group[idx][ci].matchMode === 'attribute') {
+            var av = group[idx][ci].value;
+            attrValueCounts[av] = (attrValueCounts[av] || 0) + 1;
+          }
+        }
+      }
+
+      // Find anchor per item: prefer text, fall back to unique attribute candidates
+      for (var ii = 0; ii < indices.length; ii++) {
+        var idx = parseInt(indices[ii]);
+        var bestAnchor = null;
+        // Try text candidates first (richer scoring signals)
+        for (var ci = 0; ci < group[idx].length; ci++) {
+          if (group[idx][ci].matchMode === 'attribute') continue;
+          var r = best(group[idx][ci], textEls);
+          if (r && (!bestAnchor || r.score > bestAnchor.score)) {
+            bestAnchor = { index: idx, candidate: group[idx][ci], element: r.element, score: r.score };
+          }
+        }
+        // If no text anchor, try unique attribute candidates (shared URLs still excluded)
+        if (!bestAnchor) {
+          for (var ci = 0; ci < group[idx].length; ci++) {
+            var cand = group[idx][ci];
+            if (cand.matchMode !== 'attribute') continue;
+            if (attrValueCounts[cand.value] > 1) continue;
+            var r = findBest(cand, textEls, attrEls);
+            if (r && (!bestAnchor || r.score > bestAnchor.score)) {
+              bestAnchor = { index: idx, candidate: cand, element: r.element, score: r.score };
+            }
+          }
+        }
+        if (bestAnchor) anchors.push(bestAnchor);
+      }
+
+      // Try to find validated structural regions from anchors
+      var regionMap = anchors.length >= 2 ? findArrayRegions(anchors) : null;
+
+      if (regionMap) {
+        var regionList = [];
+        for (var ai = 0; ai < anchors.length; ai++) {
+          var a = anchors[ai];
+          commit(a.candidate, a.element, a.score);
+          var region = regionMap[a.index];
+          if (region) {
+            regionList.push({ index: a.index, region: region });
+            // Match remaining candidates within region only
+            var rest = group[a.index].filter(function(c) { return c !== a.candidate; });
+            if (rest.length > 0) {
+              var rEls = textEls.filter(function(el) { return region.contains(el); });
+              var rAEls = attrEls.filter(function(ae) { return region.contains(ae.element); });
+              for (var ri = 0; ri < rest.length; ri++) {
+                var r = findBest(rest[ri], rEls, rAEls);
+                if (r) commit(rest[ri], r.element, r.score);
+              }
+            }
+          }
+        }
+        // Unanchored items — fall back to global matching
+        for (var ii = 0; ii < indices.length; ii++) {
+          var idx = parseInt(indices[ii]);
+          var isAnchored = false;
+          for (var ai = 0; ai < anchors.length; ai++) {
+            if (anchors[ai].index === idx) { isAnchored = true; break; }
+          }
+          if (!isAnchored) matchGlobal(group[idx]);
+        }
+        regionList.sort(function(a, b) {
+          return a.region.compareDocumentPosition(b.region) & 2 ? 1 : -1;
+        });
+        // Verify DOM order matches data index order — non-monotonic means anchors swapped
+        var monotonic = true;
+        for (var mi = 1; mi < regionList.length; mi++) {
+          if (regionList[mi].index <= regionList[mi - 1].index) { monotonic = false; break; }
+        }
+        if (regionList.length >= 2 && monotonic) regions.set(af, regionList);
+      } else {
+        // No valid regions — match everything globally
+        for (var ii = 0; ii < indices.length; ii++) {
+          matchGlobal(group[indices[ii]]);
+        }
+      }
+    }
+
+    return { mappings: m, fieldToElement: f2e, arrayRegions: regions };
   }
 
   function findMatch(el) {
@@ -170,11 +399,10 @@ export const OVERLAY_SCRIPT = `(function(){
     highlight.style.opacity = '1';
   }
 
-  function showTooltip(path, conf) {
-    var label = path;
-    if (conf < HIGH) label += ' (edit in form)';
-    tooltip.textContent = label;
-    // Position above highlight
+  var modKey = /Mac|iPhone|iPad/.test(navigator.platform) ? '\u2318' : 'Ctrl';
+
+  function showTooltip(text) {
+    tooltip.textContent = text;
     var hRect = highlight.getBoundingClientRect();
     tooltip.style.left = hRect.left + 'px';
     tooltip.style.top = Math.max(0, hRect.top - 26) + 'px';
@@ -188,80 +416,107 @@ export const OVERLAY_SCRIPT = `(function(){
 
   // --- Events ---
   var rafPending = false;
-  var cursorEl = null;    // element with overridden cursor
-  var cursorOrig = '';    // its original cursor value
   document.addEventListener('mousemove', function(e) {
-    if (rafPending || editing) return;
+    if (rafPending || editing || selected) return; // no hover when selected
     rafPending = true;
     requestAnimationFrame(function() {
       rafPending = false;
       var el = document.elementFromPoint(e.clientX, e.clientY);
-      if (!el) { hideHighlight(); restoreCursor(); return; }
+      if (!el) { hideHighlight(); return; }
       var match = findMatch(el);
       if (match && match.confidence >= MED) {
         var entry = fieldToElement ? fieldToElement.get(match.fieldPath) : null;
         var target = entry ? entry.element : el;
         positionHighlight(target);
-        showTooltip(match.fieldPath, match.confidence);
-        // Show text cursor on HIGH-confidence editable elements
-        if (match.confidence >= HIGH && match.candidate.editable) {
-          if (cursorEl !== target) {
-            restoreCursor();
-            cursorOrig = target.style.cursor || '';
-            target.style.cursor = 'text';
-            cursorEl = target;
-          }
+        if (match.confidence >= HIGH) {
+          highlight.style.borderStyle = 'solid';
+          highlight.style.background = 'rgba(59,130,246,0.08)';
         } else {
-          restoreCursor();
+          highlight.style.borderStyle = 'dashed';
+          highlight.style.background = 'rgba(59,130,246,0.04)';
         }
+        var tip = (match.confidence >= HIGH && match.candidate.editable)
+          ? match.fieldPath + '  \u00b7  ' + modKey + '+click \u2192 form'
+          : match.fieldPath + '  \u00b7  click \u2192 form';
+        showTooltip(tip);
       } else {
         hideHighlight();
-        restoreCursor();
       }
     });
   }, { passive: true });
 
-  function restoreCursor() {
-    if (cursorEl) {
-      cursorEl.style.cursor = cursorOrig;
-      cursorEl = null;
-      cursorOrig = '';
-    }
+  function selectElement(target, match) {
+    selected = { element: target, match: match };
+    positionHighlight(target);
+    highlight.style.borderWidth = '3px';
+    highlight.style.borderStyle = 'solid';
+    highlight.style.background = 'rgba(59,130,246,0.12)';
+    showTooltip(match.fieldPath + ' \u00b7 click to edit  \u00b7  ' + modKey + '+click \u2192 form');
   }
 
-  // Click: focus field in editor (delayed to allow dblclick)
-  var clickTimer = null;
+  function deselect() {
+    selected = null;
+    hideHighlight();
+    highlight.style.borderWidth = '2px';
+    highlight.style.borderStyle = 'solid';
+    highlight.style.background = 'rgba(59,130,246,0.08)';
+  }
+
+  // Click: select → act on second click. Non-editable fields go to panel on first click.
   document.addEventListener('click', function(e) {
     if (!mappings || editing) return;
-    var match = findMatch(e.target);
-    if (match && match.confidence >= HIGH) {
-      e.preventDefault();
-      e.stopPropagation();
-      if (clickTimer) clearTimeout(clickTimer);
-      clickTimer = setTimeout(function() {
-        clickTimer = null;
-        window.parent.postMessage({ type: 'mimsy:focus', fieldPath: match.fieldPath }, location.origin);
-      }, 250);
-    }
-  }, true);
 
-  // Prevent link navigation in overlay mode
-  document.addEventListener('click', function(e) {
+    // Prevent link navigation in overlay mode
     var link = e.target.closest ? e.target.closest('a[href]') : null;
-    if (link && !e.defaultPrevented) {
-      e.preventDefault();
+    if (link) e.preventDefault();
+
+    var match = findMatch(e.target);
+    if (!match || match.confidence < MED) {
+      deselect();
+      return;
     }
+    e.preventDefault();
+    e.stopPropagation();
+
+    var entry = fieldToElement ? fieldToElement.get(match.fieldPath) : null;
+    var target = entry ? entry.element : e.target;
+    var canInline = match.candidate.editable && match.confidence >= HIGH;
+
+    // Modifier+click → always go to form field
+    if (e.metaKey || e.ctrlKey) {
+      window.parent.postMessage({ type: 'mimsy:focus', fieldPath: match.fieldPath }, location.origin);
+      deselect();
+      return;
+    }
+
+    // If clicking the already-selected element → act
+    if (selected && selected.element === target) {
+      if (canInline) {
+        deselect();
+        activateInlineEdit(target, match);
+      } else {
+        window.parent.postMessage({ type: 'mimsy:focus', fieldPath: match.fieldPath }, location.origin);
+        deselect();
+      }
+      return;
+    }
+
+    // Non-editable fields: skip select, go straight to panel
+    if (!canInline) {
+      window.parent.postMessage({ type: 'mimsy:focus', fieldPath: match.fieldPath }, location.origin);
+      return;
+    }
+
+    // Editable text: select first, inline edit on second click
+    selectElement(target, match);
   }, true);
 
-  // Double-click: inline edit (Gate 2)
-  document.addEventListener('dblclick', function(e) {
-    if (!mappings || editing) return;
-    if (clickTimer) { clearTimeout(clickTimer); clickTimer = null; }
-    var match = findMatch(e.target);
-    if (!match || match.confidence < HIGH || !match.candidate.editable) return;
-    e.preventDefault();
-    var entry = fieldToElement ? fieldToElement.get(match.fieldPath) : null;
-    if (entry) activateInlineEdit(entry.element, match);
+  // Escape to deselect
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape' && selected && !editing) {
+      deselect();
+      e.preventDefault();
+    }
   }, true);
 
   function activateInlineEdit(element, match) {
@@ -320,26 +575,35 @@ export const OVERLAY_SCRIPT = `(function(){
     element.addEventListener('paste', handlePaste);
   }
 
-  // --- Gate 3: Scoped Array Reorder ---
-  // Requires each array item to have at least one HIGH-confidence match (anchor).
-  // Not all fields — just one reliable anchor per item to identify its DOM region.
+  // --- Gate: Relaxed Array Reorder Safety ---
+  // Requires >=60% of items to have HIGH-confidence anchors,
+  // remaining items must have at least MED, and validated regions must exist.
   function isArrayReorderSafe(arrayPath) {
+    if (!arrayRegions || !arrayRegions.has(arrayPath)) return false;
     if (!candidates || !fieldToElement) return false;
-    var indices = {};
+    var regionItems = arrayRegions.get(arrayPath);
+    var items = {};
     for (var i = 0; i < candidates.length; i++) {
       var c = candidates[i];
       if (c.arrayField === arrayPath && c.arrayIndex !== undefined) {
-        if (!indices[c.arrayIndex]) indices[c.arrayIndex] = false;
+        if (!items[c.arrayIndex]) items[c.arrayIndex] = { high: false, med: false };
         var entry = fieldToElement.get(c.fieldPath);
-        if (entry && entry.confidence >= HIGH) indices[c.arrayIndex] = true;
+        if (entry) {
+          if (entry.confidence >= HIGH) items[c.arrayIndex].high = true;
+          if (entry.confidence >= MED) items[c.arrayIndex].med = true;
+        }
       }
     }
-    var keys = Object.keys(indices);
+    var keys = Object.keys(items);
     if (keys.length < 2) return false;
+    // Regions must cover every item — partial coverage means some items can't be dragged
+    if (regionItems.length !== keys.length) return false;
+    var highCount = 0;
     for (var k = 0; k < keys.length; k++) {
-      if (!indices[keys[k]]) return false;
+      if (items[keys[k]].high) highCount++;
+      else if (!items[keys[k]].med) return false;
     }
-    return true;
+    return highCount / keys.length >= 0.6;
   }
 
   function commonParent(a, b) {
@@ -354,50 +618,232 @@ export const OVERLAY_SCRIPT = `(function(){
     return document.body;
   }
 
-  function findContentAncestor(el) {
+  // --- Probe helpers: DOM path for deterministic element identification ---
+  function getElementPath(el) {
+    var path = [];
     var cur = el;
-    while (cur.parentElement && cur.parentElement !== document.body) {
-      if (cur.parentElement.children.length >= 2) return cur;
-      cur = cur.parentElement;
+    while (cur && cur !== document.body && cur !== document.documentElement) {
+      var parent = cur.parentElement;
+      if (!parent) break;
+      var idx = 0;
+      for (var i = 0; i < parent.children.length; i++) {
+        if (parent.children[i] === cur) { idx = i; break; }
+      }
+      path.unshift(cur.tagName + ':' + idx);
+      cur = parent;
+    }
+    return path;
+  }
+
+  function followElementPath(path) {
+    var cur = document.body;
+    for (var i = 0; i < path.length; i++) {
+      var parts = path[i].split(':');
+      var tag = parts[0];
+      var idx = parseInt(parts[1]);
+      if (!cur.children || !cur.children[idx]) return null;
+      cur = cur.children[idx];
+      if (cur.tagName !== tag) return null;
     }
     return cur;
   }
 
-  function findCommonAncestor(els) {
-    if (els.length === 0) return document.body;
-    if (els.length === 1) return findContentAncestor(els[0]);
-    var a = els[0];
-    for (var i = 1; i < els.length; i++) a = commonParent(a, els[i]);
-    return findContentAncestor(a);
+  /** Walk DOM for probe strings. Returns { fieldPath: [ { path, attribute, inHead? } ] }. */
+  function scanForProbes(probeMap) {
+    var result = {};
+    var PROBE_ATTRS = ['src', 'href', 'poster', 'content', 'alt', 'title', 'placeholder'];
+    var probeIds = Object.keys(probeMap);
+    if (probeIds.length === 0) return result;
+
+    function addHit(fp, hit) {
+      if (!result[fp]) result[fp] = [];
+      result[fp].push(hit);
+    }
+
+    // Scan text nodes in body (skip script/style — their text is code, not visible content)
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(node) {
+        var p = node.parentElement;
+        if (p && (p.tagName === 'SCRIPT' || p.tagName === 'STYLE' || p.tagName === 'NOSCRIPT')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    while (walker.nextNode()) {
+      var text = walker.currentNode.textContent;
+      if (!text) continue;
+      for (var pi = 0; pi < probeIds.length; pi++) {
+        var pid = probeIds[pi];
+        if (text.indexOf(pid) !== -1) {
+          var el = walker.currentNode.parentElement;
+          if (el) addHit(probeMap[pid], { path: getElementPath(el), attribute: null });
+        }
+      }
+    }
+
+    // Scan attributes on all body elements
+    var allEls = document.body.querySelectorAll('*');
+    for (var i = 0; i < allEls.length; i++) {
+      var el = allEls[i];
+      if (el.hasAttribute('data-mimsy-highlight') || el.hasAttribute('data-mimsy-tooltip') || el.hasAttribute('data-mimsy-drag')) continue;
+      for (var j = 0; j < PROBE_ATTRS.length; j++) {
+        var av = el.getAttribute(PROBE_ATTRS[j]);
+        if (!av) continue;
+        for (var pi = 0; pi < probeIds.length; pi++) {
+          if (av.indexOf(probeIds[pi]) !== -1) {
+            addHit(probeMap[probeIds[pi]], { path: getElementPath(el), attribute: PROBE_ATTRS[j] });
+          }
+        }
+      }
+      // background-image
+      var bg = el.style.backgroundImage;
+      if (bg) {
+        for (var pi = 0; pi < probeIds.length; pi++) {
+          if (bg.indexOf(probeIds[pi]) !== -1) {
+            addHit(probeMap[probeIds[pi]], { path: getElementPath(el), attribute: 'backgroundImage' });
+          }
+        }
+      }
+    }
+
+    // Scan <head> elements (title, meta)
+    var headEls = document.head ? document.head.querySelectorAll('title, meta[content]') : [];
+    for (var i = 0; i < headEls.length; i++) {
+      var el = headEls[i];
+      if (el.tagName === 'TITLE') {
+        var tt = el.textContent || '';
+        for (var pi = 0; pi < probeIds.length; pi++) {
+          if (tt.indexOf(probeIds[pi]) !== -1) addHit(probeMap[probeIds[pi]], { path: ['HEAD:' + i], attribute: null, inHead: true });
+        }
+      } else {
+        var cv = el.getAttribute('content') || '';
+        for (var pi = 0; pi < probeIds.length; pi++) {
+          if (cv.indexOf(probeIds[pi]) !== -1) addHit(probeMap[probeIds[pi]], { path: ['HEAD:' + i], attribute: 'content', inHead: true });
+        }
+      }
+    }
+
+    // Scan JSON-LD
+    var jsonLd = document.querySelectorAll('script[type="application/ld+json"]');
+    for (var i = 0; i < jsonLd.length; i++) {
+      var jt = jsonLd[i].textContent || '';
+      for (var pi = 0; pi < probeIds.length; pi++) {
+        if (jt.indexOf(probeIds[pi]) !== -1) addHit(probeMap[probeIds[pi]], { path: getElementPath(jsonLd[i]), attribute: 'jsonld', inHead: true });
+      }
+    }
+
+    return result;
+  }
+
+  /** Apply a probeMapping to build mappings/fieldToElement from element paths.
+   *  probeMapping values are arrays: [ { path, attribute, inHead? }, ... ]
+   *  First body hit becomes the interactive target; all hits are mapped. */
+  function applyProbeMapping(probeMapping, cands) {
+    var PROBED = 1.0;
+    mappings = new Map();
+    fieldToElement = new Map();
+
+    // Build candidate lookup by fieldPath
+    var candMap = {};
+    for (var i = 0; i < cands.length; i++) candMap[cands[i].fieldPath] = cands[i];
+
+    for (var fp in probeMapping) {
+      var hits = probeMapping[fp];
+      // Normalize: accept both single object (legacy) and array format
+      if (!Array.isArray(hits)) hits = [hits];
+      var cand = candMap[fp];
+      if (!cand) continue;
+
+      for (var hi = 0; hi < hits.length; hi++) {
+        var entry = hits[hi];
+        if (entry.inHead) continue; // Head elements not interactable
+        var el = followElementPath(entry.path);
+        if (!el) continue;
+
+        mappings.set(el, { fieldPath: fp, confidence: PROBED, candidate: cand });
+        // First resolved body element becomes the primary interactive target
+        if (!fieldToElement.has(fp)) {
+          fieldToElement.set(fp, { element: el, confidence: PROBED });
+        }
+      }
+    }
+
+    // Build array regions from probed elements
+    buildProbedRegions(cands);
+  }
+
+  /** Check if current probe mapping is stale (no visible elements resolved). */
+  function isMappingStale() {
+    if (!fieldToElement || fieldToElement.size === 0) return true;
+    var visible = 0;
+    fieldToElement.forEach(function(v) {
+      if (v.element) {
+        var r = v.element.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) visible++;
+      }
+    });
+    return visible === 0;
+  }
+
+  /** Build array regions from deterministic probe mapping. */
+  function buildProbedRegions(cands) {
+    if (!fieldToElement) return;
+    arrayRegions = new Map();
+
+    // Group mapped elements by arrayField and arrayIndex
+    var byArray = {};
+    for (var i = 0; i < cands.length; i++) {
+      var c = cands[i];
+      if (c.arrayField === undefined || c.arrayIndex === undefined) continue;
+      var entry = fieldToElement.get(c.fieldPath);
+      if (!entry) continue;
+      if (!byArray[c.arrayField]) byArray[c.arrayField] = {};
+      if (!byArray[c.arrayField][c.arrayIndex]) byArray[c.arrayField][c.arrayIndex] = [];
+      byArray[c.arrayField][c.arrayIndex].push(entry.element);
+    }
+
+    for (var af in byArray) {
+      var group = byArray[af];
+      var indices = Object.keys(group).map(Number).sort(function(a, b) { return a - b; });
+      if (indices.length < 2) continue;
+
+      // Find LCA of all item elements, then walk each item's elements up to direct child of LCA
+      var allEls = [];
+      for (var ii = 0; ii < indices.length; ii++) {
+        allEls = allEls.concat(group[indices[ii]]);
+      }
+      if (allEls.length < 2) continue;
+      var lca = allEls[0];
+      for (var i = 1; i < allEls.length; i++) lca = commonParent(lca, allEls[i]);
+
+      var regionList = [];
+      var seen = [];
+      var valid = true;
+      for (var ii = 0; ii < indices.length; ii++) {
+        var itemEls = group[indices[ii]];
+        // Find common parent of this item's elements
+        var itemRoot = itemEls[0];
+        for (var j = 1; j < itemEls.length; j++) itemRoot = commonParent(itemRoot, itemEls[j]);
+        // Walk up to direct child of LCA
+        while (itemRoot.parentElement && itemRoot.parentElement !== lca) itemRoot = itemRoot.parentElement;
+        if (itemRoot === lca || !itemRoot.parentElement) { valid = false; break; }
+        if (seen.indexOf(itemRoot) !== -1) { valid = false; break; }
+        seen.push(itemRoot);
+        regionList.push({ index: indices[ii], region: itemRoot });
+      }
+
+      if (valid && seen.length >= 2 && validateSiblingPattern(seen)) {
+        arrayRegions.set(af, regionList);
+      }
+    }
   }
 
   function identifyBlockRegions() {
-    if (!candidates || !fieldToElement) return null;
-    var arrays = {};
-    for (var i = 0; i < candidates.length; i++) {
-      var c = candidates[i];
-      if (c.arrayField === undefined) continue;
-      if (!isArrayReorderSafe(c.arrayField)) continue;
-      if (!arrays[c.arrayField]) arrays[c.arrayField] = {};
-      if (!arrays[c.arrayField][c.arrayIndex]) arrays[c.arrayField][c.arrayIndex] = [];
-      var entry = fieldToElement.get(c.fieldPath);
-      if (entry) arrays[c.arrayField][c.arrayIndex].push(entry.element);
-    }
-    var regions = new Map();
-    for (var ap in arrays) {
-      var items = [];
-      for (var idx in arrays[ap]) {
-        var els = arrays[ap][idx];
-        if (els.length === 0) continue;
-        var region = els.length === 1 ? findContentAncestor(els[0]) : findCommonAncestor(els);
-        items.push({ index: parseInt(idx), region: region });
-      }
-      items.sort(function(a, b) {
-        return a.region.compareDocumentPosition(b.region) & 2 ? 1 : -1;
-      });
-      if (items.length >= 2) regions.set(ap, items);
-    }
-    return regions.size > 0 ? regions : null;
+    if (!arrayRegions || arrayRegions.size === 0) return null;
+    var safe = new Map();
+    arrayRegions.forEach(function(items, ap) {
+      if (isArrayReorderSafe(ap)) safe.set(ap, items);
+    });
+    return safe.size > 0 ? safe : null;
   }
 
   function cleanupDragHandles() {
@@ -415,6 +861,7 @@ export const OVERLAY_SCRIPT = `(function(){
         h.region.style.position = h.origPos;
         h.region.style.outline = '';
         h.region.style.outlineOffset = '';
+        if (h.grip) h.grip.remove();
       }
     }
     dragHandles = [];
@@ -423,24 +870,36 @@ export const OVERLAY_SCRIPT = `(function(){
 
   function setupDragHandles() {
     cleanupDragHandles();
-    blockRegions = identifyBlockRegions();
-    if (!blockRegions) return;
-    blockRegions.forEach(function(items, arrayPath) {
+    var regs = identifyBlockRegions();
+    if (!regs) return;
+    regs.forEach(function(items, arrayPath) {
       for (var i = 0; i < items.length; i++) {
         (function(item) {
           var region = item.region;
           var origPos = region.style.position || '';
           if (!origPos || origPos === 'static') region.style.position = 'relative';
           region.setAttribute('draggable', 'true');
+          // Persistent grip icon (6-dot 2x3 grid)
+          var grip = document.createElement('div');
+          grip.setAttribute('data-mimsy-grip', '');
+          grip.style.cssText = 'position:absolute;top:50%;left:4px;transform:translateY(-50%);width:10px;display:flex;flex-wrap:wrap;gap:1.5px;justify-content:center;opacity:0.2;transition:opacity 150ms;pointer-events:none;z-index:99997;';
+          for (var d = 0; d < 6; d++) {
+            var dot = document.createElement('div');
+            dot.style.cssText = 'width:2.5px;height:2.5px;border-radius:50%;background:#8b5cf6;';
+            grip.appendChild(dot);
+          }
+          region.appendChild(grip);
           var enter = function() {
             region.style.outline = '2px solid rgba(139,92,246,0.5)';
             region.style.outlineOffset = '-2px';
             region.style.cursor = 'grab';
+            grip.style.opacity = '0.6';
           };
           var leave = function() {
             region.style.outline = '';
             region.style.outlineOffset = '';
             region.style.cursor = '';
+            grip.style.opacity = '0.2';
           };
           var dragstart = function(e) {
             if (editing) { e.preventDefault(); return; }
@@ -487,7 +946,7 @@ export const OVERLAY_SCRIPT = `(function(){
           region.addEventListener('dragover', dragover);
           region.addEventListener('dragleave', dragleave);
           region.addEventListener('drop', drop);
-          dragHandles.push({ region: region, origPos: origPos, enter: enter, leave: leave, dragstart: dragstart, dragend: dragend, dragover: dragover, dragleave: dragleave, drop: drop });
+          dragHandles.push({ region: region, grip: grip, origPos: origPos, enter: enter, leave: leave, dragstart: dragstart, dragend: dragend, dragover: dragover, dragleave: dragleave, drop: drop });
         })(items[i]);
       }
     });
@@ -498,6 +957,13 @@ export const OVERLAY_SCRIPT = `(function(){
     if (e.source !== window.parent || e.origin !== location.origin) return;
     var d = e.data;
     if (!d || !d.type) return;
+
+    if (d.type === 'mimsy:probe') {
+      // Mutation probing: DOM has been rendered with probe sentinels.
+      // Walk DOM, find probe strings, report element paths back to editor.
+      var probeResult = scanForProbes(d.probeMap || {});
+      window.parent.postMessage({ type: 'mimsy:probe-mapped', mapping: probeResult }, location.origin);
+    }
 
     if (d.type === 'mimsy:init') {
       candidates = d.candidates;
@@ -513,9 +979,37 @@ export const OVERLAY_SCRIPT = `(function(){
           return;
         }
       }
-      var result = runMatching(candidates);
-      mappings = result.mappings;
-      fieldToElement = result.fieldToElement;
+
+      if (d.probeMapping) {
+        // Deterministic mapping from mutation probing — store durably
+        storedProbeMapping = d.probeMapping;
+        applyProbeMapping(d.probeMapping, candidates);
+        // Self-healing: if no mapped elements are visible, mapping is stale
+        if (isMappingStale()) {
+          storedProbeMapping = null;
+          var result = runMatching(candidates);
+          mappings = result.mappings;
+          fieldToElement = result.fieldToElement;
+          arrayRegions = result.arrayRegions;
+          window.parent.postMessage({ type: 'mimsy:probe-stale' }, location.origin);
+        }
+      } else if (storedProbeMapping) {
+        // Re-apply durable probe mapping (e.g., after autosave HMR with no new probe)
+        applyProbeMapping(storedProbeMapping, candidates);
+        if (isMappingStale()) {
+          storedProbeMapping = null;
+          var result = runMatching(candidates);
+          mappings = result.mappings;
+          fieldToElement = result.fieldToElement;
+          arrayRegions = result.arrayRegions;
+        }
+      } else {
+        // Heuristic fallback (GitHub mode or probing not available)
+        var result = runMatching(candidates);
+        mappings = result.mappings;
+        fieldToElement = result.fieldToElement;
+        arrayRegions = result.arrayRegions;
+      }
       cacheHash = d.contentHash || '';
       reportMapped();
       setupDragHandles();
@@ -525,7 +1019,9 @@ export const OVERLAY_SCRIPT = `(function(){
       var entry = fieldToElement.get(d.fieldPath);
       if (entry) {
         positionHighlight(entry.element);
-        showTooltip(d.fieldPath, entry.confidence);
+        highlight.style.borderStyle = 'solid';
+        highlight.style.background = 'rgba(59,130,246,0.08)';
+        showTooltip(d.fieldPath + '  \u00b7  ' + modKey + '+click \u2192 form');
       }
     }
 
@@ -548,7 +1044,7 @@ export const OVERLAY_SCRIPT = `(function(){
 
   // Handle Astro View Transitions in preview
   document.addEventListener('astro:after-swap', function() {
-    // DOM changed — reset any active inline edit and re-run matching
+    // DOM changed — reset active state and re-run matching
     if (editing) {
       editing.contentEditable = 'false';
       editing.style.outline = '';
@@ -556,18 +1052,54 @@ export const OVERLAY_SCRIPT = `(function(){
       editing.style.borderRadius = '';
       editing = null;
     }
+    if (selected) deselect();
     if (candidates) {
       // Re-append overlay elements (they may have been removed by swap)
       if (!document.body.contains(highlight)) document.body.appendChild(highlight);
       if (!document.body.contains(tooltip)) document.body.appendChild(tooltip);
       if (!document.body.contains(dropIndicator)) document.body.appendChild(dropIndicator);
-      var result = runMatching(candidates);
-      mappings = result.mappings;
-      fieldToElement = result.fieldToElement;
+      // Re-apply durable probe mapping if available; fall back to heuristics
+      if (storedProbeMapping) {
+        applyProbeMapping(storedProbeMapping, candidates);
+      } else {
+        var result = runMatching(candidates);
+        mappings = result.mappings;
+        fieldToElement = result.fieldToElement;
+        arrayRegions = result.arrayRegions;
+      }
       reportMapped();
       setupDragHandles();
     }
   });
+
+  // --- MutationObserver: catch dynamic content (island hydration, lazy load, fetch) ---
+  var mutationTimer = null;
+  var observer = new MutationObserver(function(mutations) {
+    // Debounce: re-verify mapping 500ms after last mutation batch
+    if (mutationTimer) clearTimeout(mutationTimer);
+    mutationTimer = setTimeout(function() {
+      if (!mappings || !fieldToElement) return;
+      // Spot-check: verify a few cached mappings still point to correct elements
+      var invalid = 0;
+      mappings.forEach(function(v, k) {
+        if (!document.body.contains(k)) invalid++;
+      });
+      if (invalid > 0 && candidates) {
+        // Re-apply durable probe mapping if available; fall back to heuristics
+        if (storedProbeMapping) {
+          applyProbeMapping(storedProbeMapping, candidates);
+        } else {
+          var result = runMatching(candidates);
+          mappings = result.mappings;
+          fieldToElement = result.fieldToElement;
+          arrayRegions = result.arrayRegions;
+        }
+        reportMapped();
+        setupDragHandles();
+      }
+    }, 500);
+  });
+  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 
   // Ready
   window.parent.postMessage({ type: 'mimsy:ready' }, location.origin);

@@ -160,18 +160,19 @@ function isReference(schema: any): boolean {
 /**
  * Validate frontmatter against a collection's Zod schema.
  * Uses safeParseAsync to support async refinements.
- * Validates only — does NOT return parsed/coerced data.
+ * Returns the parsed/coerced Zod output on success so callers can
+ * write the cleaned data (with defaults applied, unknown keys stripped).
  * Walks error.issues to produce full dotted paths for nested fields
  * (e.g., "sections[0].heading" instead of just "sections").
  */
 export async function validateFrontmatter(
   schema: ZodTypeAny,
   frontmatter: Record<string, unknown>
-): Promise<{ success: true } | { success: false; error: string; fieldErrors: Record<string, string[]> }> {
+): Promise<{ success: true; data: Record<string, unknown> } | { success: false; error: string; fieldErrors: Record<string, string[]> }> {
   const result = await schema.safeParseAsync(frontmatter);
 
   if (result.success) {
-    return { success: true };
+    return { success: true, data: result.data as Record<string, unknown> };
   }
 
   const fieldErrors: Record<string, string[]> = {};

@@ -43,6 +43,7 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
     return new Response(JSON.stringify({ error: 'Missing frontmatter' }), { status: 400 });
   }
 
+  let cleanedFrontmatter = frontmatter;
   const schema = validators[collection];
   if (schema) {
     const validation = await validateFrontmatter(schema, frontmatter);
@@ -52,12 +53,13 @@ export const PUT: APIRoute = async ({ params, request, locals }) => {
         fieldErrors: validation.fieldErrors,
       }), { status: 400 });
     }
+    cleanedFrontmatter = validation.data;
   }
 
   const adapter = await createAdapter(request, locals);
 
   try {
-    await adapter.updateEntry(collection, slug, frontmatter, content ?? '');
+    await adapter.updateEntry(collection, slug, cleanedFrontmatter, content ?? '');
   } catch (err: any) {
     if (err instanceof ConflictError) {
       return new Response(JSON.stringify({ error: err.message }), { status: 409 });

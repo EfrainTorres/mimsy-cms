@@ -1,0 +1,21 @@
+---
+/** Component indirection test: image src passes through props */
+interface Props {
+  name: string;
+  logo: string;
+  industry: string;
+  url?: string;
+}
+const { name, logo, industry, url } = Astro.props;
+---
+<div class="flex items-center gap-4">
+  <img src={logo} alt={`${name} logo`} class="w-16 h-16 rounded-lg object-cover" />
+  <div>
+    {url ? (
+      <a href={url} class="text-lg font-semibold text-stone-900 hover:text-blue-600 transition-colors">{name}</a>
+    ) : (
+      <p class="text-lg font-semibold text-stone-900">{name}</p>
+    )}
+    <p class="text-sm text-stone-500">{industry}</p>
+  </div>
+</div>

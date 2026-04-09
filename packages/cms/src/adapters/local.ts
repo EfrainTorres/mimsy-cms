@@ -33,14 +33,15 @@ export class LocalContentAdapter implements ContentAdapter {
     const dir = this.safe(this.contentDir, collection);
     if (!dir || !existsSync(dir)) return [];
 
-    const files = await readdir(dir);
+    const files = await readdir(dir, { recursive: true });
     const entries: ContentEntry[] = [];
 
     for (const file of files) {
       const ext = extname(file);
       if (ext !== '.md' && ext !== '.mdx' && ext !== '.json') continue;
 
-      const slug = parsePath(file).name;
+      // For nested files, slug is the relative path without extension (e.g. "subdir/post")
+      const slug = file.slice(0, -ext.length).replace(/\\/g, '/');
       const filePath = join(dir, file); // file comes from readdir, not user input
       const [rawContent, fileStat] = await Promise.all([
         readFile(filePath, 'utf-8'),
@@ -91,17 +92,16 @@ export class LocalContentAdapter implements ContentAdapter {
     format?: 'json' | 'markdown'
   ): Promise<void> {
     const dir = this.confined(this.contentDir, collection);
-    if (!existsSync(dir)) {
-      await mkdir(dir, { recursive: true });
-    }
 
     const isJson = format === 'json' || (format !== 'markdown' && await this.isJsonCollection(collection));
 
     if (isJson) {
       const filePath = this.confined(dir, `${slug}.json`);
+      await mkdir(dirname(filePath), { recursive: true });
       await writeFile(filePath, JSON.stringify(frontmatter, null, 2) + '\n', 'utf-8');
     } else {
       const filePath = this.confined(dir, `${slug}.md`);
+      await mkdir(dirname(filePath), { recursive: true });
       const content = matter.stringify('\n' + body, frontmatter);
       await writeFile(filePath, content, 'utf-8');
     }

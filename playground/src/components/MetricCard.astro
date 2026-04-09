@@ -1,0 +1,12 @@
+---
+/** Component indirection test: content passes through props, not rendered inline */
+interface Props {
+  label: string;
+  value: string;
+}
+const { label, value } = Astro.props;
+---
+<div class="bg-white border border-stone-200 rounded-lg p-6 text-center">
+  <p class="text-3xl font-bold text-blue-600">{value}</p>
+  <p class="text-sm text-stone-500 mt-1">{label}</p>
+</div>

@@ -1,6 +1,7 @@
 import { LocalContentAdapter } from './local.js';
 import type { ContentAdapter, MimsyUser } from '../types.js';
 import { resolveContentDir } from '../utils.js';
+import config from 'virtual:mimsy/config';
 
 /** Read an env var. Checks import.meta.env (Astro/Vite) then process.env (Node/Vercel/Netlify). */
 export function getEnv(key: string): string | undefined {
@@ -28,7 +29,7 @@ export async function createAdapter(
 ): Promise<ContentAdapter> {
   const repo = getEnv('MIMSY_GITHUB_REPO');
   if (!repo) {
-    return new LocalContentAdapter(resolveContentDir());
+    return new LocalContentAdapter(resolveContentDir(config.contentDir));
   }
 
   // GitHub mode — dynamic import to avoid loading octokit in local mode

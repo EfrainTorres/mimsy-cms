@@ -25,6 +25,22 @@
   let refQuery = $state('');
   let refOpen = $state(false);
 
+  // Detect string fields that likely hold image URLs — shows browse button + preview.
+  // Uses description (.describe() text) and field name as hints.
+  // Field stays type 'string' so overlay matching/editing is unaffected.
+  const IMAGE_HINT_DESC = /\bimage\b|\bphoto\b|\bavatar\b|\bthumbnail\b|\bposter\b/i;
+  const IMAGE_HINT_NAME = /^(image|img|photo|avatar|icon|logo|thumb(nail)?|poster|cover(Image)?|banner|hero(Image)?|og(Image)?|featured(Image)?)$/i;
+  let imageHinted = $derived(
+    fieldDef.type === 'string' && (
+      (fieldDef.description && IMAGE_HINT_DESC.test(fieldDef.description)) ||
+      IMAGE_HINT_NAME.test(fieldDef.name)
+    )
+  );
+
+  // Only show <img> preview when value actually looks like a URL, not random text.
+  const URL_LIKE = /^(https?:\/\/|\/|\.\/|\.\.\/)/;
+  let showImagePreview = $derived(imageHinted && value && URL_LIKE.test(value));
+
   // Focus action for search inputs in dropdown
   function focusEl(node) { node.focus(); }
 
@@ -563,15 +579,45 @@
     {/if}
   </div>
 
-<!-- String (default) -->
+<!-- String (default) — with optional image browse/preview for image-hinted fields -->
 {:else}
-  <input
-    type="text"
-    id={fieldId}
-    value={value ?? ''}
-    oninput={(e) => onchange(e.target.value)}
-    class="mimsy-input"
-  />
+  {#if imageHinted}
+    <div>
+      <div class="flex gap-2">
+        <input
+          type="text"
+          id={fieldId}
+          value={value ?? ''}
+          oninput={(e) => onchange(e.target.value)}
+          class="mimsy-input flex-1"
+          placeholder="/src/assets/image.jpg or https://…"
+        />
+        <button
+          type="button"
+          onclick={() => {
+            window.dispatchEvent(new CustomEvent('mimsy:media:open', {
+              detail: { callback: (url) => onchange(url) }
+            }));
+          }}
+          class="mimsy-btn-secondary px-2.5"
+          title="Choose from library"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m2.25 15.75 5.159-5.159a2.25 2.25 0 0 1 3.182 0l5.159 5.159m-1.5-1.5 1.409-1.409a2.25 2.25 0 0 1 3.182 0l2.909 2.909m-18 3.75h16.5a1.5 1.5 0 0 0 1.5-1.5V6a1.5 1.5 0 0 0-1.5-1.5H3.75A1.5 1.5 0 0 0 2.25 6v12a1.5 1.5 0 0 0 1.5 1.5Zm10.5-11.25h.008v.008h-.008V8.25Zm.375 0a.375.375 0 1 1-.75 0 .375.375 0 0 1 .75 0Z" /></svg>
+        </button>
+      </div>
+      {#if showImagePreview}
+        <img src={value} class="mt-2 max-h-24 rounded object-cover" alt="" />
+      {/if}
+    </div>
+  {:else}
+    <input
+      type="text"
+      id={fieldId}
+      value={value ?? ''}
+      oninput={(e) => onchange(e.target.value)}
+      class="mimsy-input"
+    />
+  {/if}
 {/if}
 
 {#if fieldDef.description}

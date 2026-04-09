@@ -1,5 +1,6 @@
 {
   "name": "Jane Doe",
   "email": "jane@example.com",
-  "bio": "Writer"
+  "bio": "Technical writer and open-source advocate. Loves building documentation that developers actually read.",
+  "avatar": "https://i.pravatar.cc/80?u=jane"
 }
